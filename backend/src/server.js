@@ -4,6 +4,7 @@ const cors = require('cors');
 const path = require('path');
 
 const invoicesRouter = require('./routes/invoices');
+const unitsRouter = require('./routes/units');
 
 const app = express();
 
@@ -14,6 +15,7 @@ app.use(express.json());
 app.use('/uploads', express.static(path.join(__dirname, '..', 'uploads')));
 
 app.use('/api/invoices', invoicesRouter);
+app.use('/api/units', unitsRouter);
 
 const PORT = process.env.PORT || 4000;
 

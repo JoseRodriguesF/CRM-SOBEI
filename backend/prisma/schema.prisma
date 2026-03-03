@@ -5,7 +5,7 @@
 // Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
 
 generator client {
-  provider = "prisma-client"
+  provider = "prisma-client-js"
 }
 
 datasource db {
@@ -32,6 +32,9 @@ model Unit {
   id         Int       @id @default(autoincrement())
   name       String
   code       String
+  cnpj       String?
+  address    String?
+  contracts  String?
   company    Company   @relation(fields: [companyId], references: [id])
   companyId  Int
   invoices   Invoice[]
@@ -45,7 +48,7 @@ model Invoice {
   unitId       Int?
   cnpj         String
   referenceMonth String
-  totalAmount  Decimal       @db.Numeric(12, 2)
+  totalAmount  Decimal
   dueDate      DateTime
   status       InvoiceStatus
   pdfPath      String
