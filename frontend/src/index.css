@@ -91,7 +91,7 @@ body {
   border-radius: 18px;
   border: 1px solid rgba(148, 163, 184, 0.35);
   background: radial-gradient(circle at top left,
-      rgba(56, 189, 248, 0.6),
+      rgba(14, 116, 144, 0.45),
       transparent 55%),
     radial-gradient(circle at bottom right,
       rgba(15, 23, 42, 0.95),
@@ -125,11 +125,13 @@ body {
   font-weight: 600;
   letter-spacing: 0.12em;
   text-transform: uppercase;
+  color: #ffffff;
 }
 
 .top-bar-subtitle {
   font-size: 0.7rem;
-  color: var(--text-soft);
+  color: #ffffff;
+  opacity: 0.8;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -159,7 +161,7 @@ body {
   text-transform: uppercase;
   border: none;
   background: transparent;
-  color: var(--text-soft);
+  color: #ffffff;
   cursor: pointer;
   transition:
     background-color 0.16s ease,
@@ -175,9 +177,9 @@ body {
 
 .top-nav-item--active {
   background: radial-gradient(circle at top left,
-      rgba(56, 189, 248, 0.9),
-      rgba(59, 130, 246, 0.8));
-  color: #020617;
+      rgba(14, 165, 233, 0.9),
+      rgba(37, 99, 235, 0.8));
+  color: #ffffff;
   box-shadow: 0 12px 30px rgba(56, 189, 248, 0.5);
   transform: translateY(-1px);
 }
