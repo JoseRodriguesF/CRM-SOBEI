@@ -1,0 +1,20 @@
+# Node projects
+node_modules
+
+# Environment
+.env
+backend/.env
+frontend/.env
+
+# Build outputs
+frontend/dist
+
+# Prisma
+backend/prisma/generated
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
