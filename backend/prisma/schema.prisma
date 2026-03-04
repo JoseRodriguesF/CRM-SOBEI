@@ -15,8 +15,7 @@ datasource db {
 
 enum InvoiceStatus {
   PAGA
-  PENDENTE
-  ATRASADA
+  ABERTA
 }
 
 model Company {
@@ -32,25 +31,38 @@ model Unit {
   id         Int       @id @default(autoincrement())
   name       String
   code       String
-  cnpj       String?
+  cnpjs      String?   // JSON array de CNPJs, ex: ["12.345.678/0001-00", "98.765.432/0001-00"]
   address    String?
-  contracts  String?
   company    Company   @relation(fields: [companyId], references: [id])
   companyId  Int
   invoices   Invoice[]
+  services   Service[]
+}
+
+model Service {
+  id           Int       @id @default(autoincrement())
+  name         String    // Ex: "Móvel", "Internet", "Fixo"
+  contractNumber String  // Número do contrato
+  unit         Unit      @relation(fields: [unitId], references: [id])
+  unitId       Int
+  invoices     Invoice[]
+  createdAt    DateTime  @default(now())
 }
 
 model Invoice {
-  id           Int           @id @default(autoincrement())
-  company      Company       @relation(fields: [companyId], references: [id])
-  companyId    Int
-  unit         Unit?         @relation(fields: [unitId], references: [id])
-  unitId       Int?
-  cnpj         String
+  id             Int           @id @default(autoincrement())
+  company        Company       @relation(fields: [companyId], references: [id])
+  companyId      Int
+  unit           Unit?         @relation(fields: [unitId], references: [id])
+  unitId         Int?
+  service        Service?      @relation(fields: [serviceId], references: [id])
+  serviceId      Int?
+  cnpj           String
   referenceMonth String
-  totalAmount  Decimal
-  dueDate      DateTime
-  status       InvoiceStatus
-  pdfPath      String
-  createdAt    DateTime      @default(now())
+  totalAmount    Decimal
+  dueDate        DateTime
+  status         InvoiceStatus
+  serviceName    String?       // Nome do serviço extraído da fatura (cache/referência)
+  pdfPath        String
+  createdAt      DateTime      @default(now())
 }
