@@ -2,49 +2,72 @@ const fs = require('fs');
 const path = require('path');
 const nodemailer = require('nodemailer');
 const prisma = require('../lib/prisma');
-const { extractInvoiceDataFromPdf, matchUnitAndService } = require('../lib/invoiceExtractor');
+const { extractInvoiceDataWithContext, localDoubleCheckMatch } = require('../lib/invoiceExtractor');
+
+const { normalizeCnpj, parseCnpjs } = require('../lib/cnpjUtils');
 
 // ─── Controller Actions ──────────────────────────────────────────────────────
 
 exports.uploadInvoice = async (req, res) => {
+  console.log('[IA-Match] Início do processo de upload de fatura...');
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'Arquivo PDF é obrigatório.' });
     }
 
     const pdfPath = req.file.path;
-    const data = await extractInvoiceDataFromPdf(pdfPath);
 
-    // 1. Encontra ou cria a empresa (matriz) pelo CNPJ principal
-    const company = await prisma.company.upsert({
-      where: { cnpj: data.cnpj },
-      update: {},
-      create: {
-        cnpj: data.cnpj,
-        name: data.companyName || `Empresa ${data.cnpj}`,
-      },
+    // Busca todas as unidades e serviços para usar como Contexto da IA
+    const unitsContextData = await prisma.unit.findMany({
+      include: { services: true }
     });
 
-    // 2. Tenta fazer match com unidade e serviço cadastrados
+    // Passamos o contexto diretamente para a IA
+    const { data, text, rawAiOutput } = await extractInvoiceDataWithContext(pdfPath, unitsContextData);
+
+    console.log('[IA-Match] Dados extraídos do PDF combinados:', JSON.stringify(data, null, 2));
+
+    // Filtra as unidades: aqui passamos TODAS as unidades para a IA,
+    // garantindo que não deixamos de vincular uma nota só porque a Matriz
+    // veio com CNPJ ligeiramente diferente da base de dados (Ex: Faturamento cruzado).
+    const companyUnits = unitsContextData; // Passa todas as unidades
+
+    // 2. Faz o double-check de segurança do Match passando os dados da IA e as unidades da empresa
     let unitId = null;
     let serviceId = null;
     let unitName = 'Sem_Unidade';
     let svcName = data.service || 'Sem_Servico';
     let phone = data.phoneNumber || 'Sem_Telefone';
+    let matchDebug = null;
+    let finalCompanyId = null;
 
-    const hasMatchSignals = data.unitCnpj || data.unitAddress || data.contractNumber;
-
-    if (hasMatchSignals) {
-      const match = await matchUnitAndService(company.id, data);
-      if (match.unit) {
-        unitId = match.unit.id;
-        unitName = match.unit.name;
-        if (match.service) {
-          serviceId = match.service.id;
-          svcName = match.service.name;
-        }
-        console.log(`[IA] Vinculado: Unidade "${match.unit.name}"${match.service ? ` / Serviço "${match.service.name}"` : ''}`);
+    console.log(`[IA-Debug] Sinais encontrados: unitId=${data.unitId}, contractNumber=${data.contractNumber}`);
+    
+    // Tenta fazer o match local
+    const match = localDoubleCheckMatch(data, companyUnits);
+    
+    if (match.unit) {
+      unitId = match.unit.id;
+      unitName = match.unit.name;
+      finalCompanyId = match.unit.companyId; // Se achou a unidade, a fatura pertence à empresa DAQUELA unidade!
+      
+      if (match.service) {
+        serviceId = match.service.id;
+        svcName = match.service.name;
       }
+      console.log(`[IA] Vinculado com SUCESSO (${match.debug?.source}): Unidade "${match.unit.name}"${match.service ? ` / Serviço "${match.service.name}"` : ''}`);
+      matchDebug = match.debug;
+    } else {
+      matchDebug = match.debug;
+      console.log('[IA] Nenhum match de Unidade encontrado.');
+      
+      // Se NÃO achou unidade, não tem como a fatura ficar pendente de unidade sem aprovação.
+      // E como a regra de negócio atual diz que ela nunca deve ser criada se for "Unidade Não Identificada",
+      // bloqueamos agora o processo inteiramente. 
+      return res.status(400).json({ 
+          error: 'Esta fatura não corresponde a nenhuma unidade (ou serviço/contrato) atualmente cadastrada no banco de dados. Cadastre sua Unidade no painel antes de subir faturas para ela.',
+          debug: matchDebug
+      });
     }
 
     // 2.1. Renomeia o PDF para um nome amigável
@@ -66,7 +89,7 @@ exports.uploadInvoice = async (req, res) => {
     // 3. Cria a fatura
     const invoice = await prisma.invoice.create({
       data: {
-        companyId: company.id,
+        companyId: finalCompanyId,
         unitId,
         serviceId,
         cnpj: data.cnpj,
@@ -74,7 +97,8 @@ exports.uploadInvoice = async (req, res) => {
         totalAmount: data.totalAmount,
         dueDate: new Date(data.dueDate + 'T12:00:00'),
         status: data.status,
-        serviceName: data.service,
+        // Hack: Como o DB não permite novas colunas no momento, guardamos o contrato no serviceName formatado
+        serviceName: data.contractNumber ? `[CONTRATO: ${data.contractNumber}] ${data.service || 'VIVO'}` : (data.service || 'VIVO'),
         pdfPath: path.relative(path.join(__dirname, '..', '..'), finalPdfPath).replace(/\\/g, '/'),
       },
       include: {
@@ -84,7 +108,11 @@ exports.uploadInvoice = async (req, res) => {
       },
     });
 
-    return res.status(201).json(invoice);
+    return res.status(201).json({
+      ...invoice,
+      contractNumber: data.contractNumber,
+      debug: matchDebug
+    });
   } catch (err) {
     console.error('[invoices] uploadInvoice:', err);
     return res.status(500).json({ error: 'Erro ao processar fatura.', details: err.message });
