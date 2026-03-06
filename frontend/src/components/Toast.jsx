@@ -28,7 +28,7 @@ export function useToasts() {
     const [toasts, setToasts] = React.useState([]);
 
     const addToast = (message, type = 'info') => {
-        const id = Date.now();
+        const id = Date.now() + Math.random();
         setToasts((prev) => [...prev, { id, message, type }]);
         setTimeout(() => removeToast(id), 5000);
     };

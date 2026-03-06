@@ -75,12 +75,14 @@ export function InvoicesPage({ addToast }) {
 
         try {
             const newInvoice = await api.invoices.upload(file);
+            console.log('[IA-Match] Resposta da API:', newInvoice);
             // Ao invés de concatenar, recarregamos para manter ordem e filtros
             await loadInvoices();
             addToast('Fatura processada com sucesso!', 'success');
             loadSummary();
 
             if (!newInvoice.unitId) {
+                console.warn('[IA-Match] Unidade não identificada:', newInvoice);
                 addToast('Aviso: Unidade não identificada automaticamente.', 'info');
             }
         } catch (err) {
@@ -158,12 +160,31 @@ export function InvoicesPage({ addToast }) {
     };
 
     const displayService = (inv) => {
-        const name = inv.service?.name || inv.serviceName || '-';
-        const hasContract = inv.service?.contractNumber;
+        if (inv.service) {
+            return (
+                <div className="table-cell-group">
+                    <div className="table-cell-main">{inv.service.name}</div>
+                    <div className="table-cell-sub">Contrato: {inv.service.contractNumber}</div>
+                </div>
+            );
+        }
+
+        // Parse do hack de persistência caso o serviço não esteja vinculado
+        let name = inv.serviceName || '-';
+        let contract = inv.contractNumber || '';
+
+        if (name.startsWith('[CONTRATO:')) {
+            const match = name.match(/\[CONTRATO:\s*(.*?)\]\s*(.*)/);
+            if (match) {
+                contract = match[1];
+                name = match[2];
+            }
+        }
+
         return (
             <div className="table-cell-group">
                 <div className="table-cell-main">{name}</div>
-                {hasContract && <div className="table-cell-sub">Contrato: {inv.service.contractNumber}</div>}
+                {contract && <div className="table-cell-sub">Contrato: {contract}</div>}
             </div>
         );
     };
@@ -178,7 +199,7 @@ export function InvoicesPage({ addToast }) {
                     <div className="card-header">
                         <h3 className="card-title">Importar Fatura (IA)</h3>
                     </div>
-                    <div className="card-body">
+                    <div className="card-body" style={{ minWidth: 0, minHeight: '20px' }}>
                         <div className="upload-form">
                             <label className="file-input-wrapper">
                                 <span className="file-input-label">Selecionar arquivo PDF</span>
@@ -202,7 +223,7 @@ export function InvoicesPage({ addToast }) {
                     <div className="card-header">
                         <h3 className="card-title">Visão Geral</h3>
                     </div>
-                    <div className="card-body">
+                    <div className="card-body" style={{ minWidth: 0, minHeight: '20px' }}>
                         {summary ? (
                             <div className="summary-grid">
                                 <div className="summary-row">
@@ -316,8 +337,8 @@ export function InvoicesPage({ addToast }) {
                             </tr>
                         </thead>
                         <tbody>
-                            {invoices.map((inv) => (
-                                <tr key={inv.id}>
+                            {invoices.map((inv, idx) => (
+                                <tr key={`${inv.id || 'new'}-${idx}-${inv.createdAt}`}>
                                     <td>
                                         <input
                                             type="checkbox"
