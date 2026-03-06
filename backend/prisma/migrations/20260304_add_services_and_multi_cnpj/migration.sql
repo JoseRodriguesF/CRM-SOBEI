@@ -3,8 +3,20 @@
 -- updates Service model with contractNumber + createdAt,
 -- adds Unit.cnpjs (JSON text field)
 
--- DropForeignKey (UnitCNPJ)
-ALTER TABLE "UnitCNPJ" DROP CONSTRAINT IF EXISTS "UnitCNPJ_unitId_fkey";
+-- CreateTable Service
+CREATE TABLE IF NOT EXISTS "Service" (
+    "id" SERIAL NOT NULL,
+    "name" TEXT NOT NULL,
+    "contractNumber" TEXT NOT NULL DEFAULT '',
+    "unitId" INTEGER NOT NULL,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "Service_pkey" PRIMARY KEY ("id")
+);
+
+-- AddForeignKey Service -> Unit
+ALTER TABLE "Service" 
+  ADD CONSTRAINT "Service_unitId_fkey" FOREIGN KEY ("unitId") REFERENCES "Unit"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AlterTable Invoice: rename service -> serviceName, add serviceId
 ALTER TABLE "Invoice" 
@@ -21,9 +33,6 @@ ALTER TABLE "Service"
 -- AlterTable Unit: add cnpjs JSON text field
 ALTER TABLE "Unit" 
   ADD COLUMN IF NOT EXISTS "cnpjs" TEXT;
-
--- DropTable UnitCNPJ
-DROP TABLE IF EXISTS "UnitCNPJ";
 
 -- AddForeignKey Invoice -> Service
 ALTER TABLE "Invoice" 
