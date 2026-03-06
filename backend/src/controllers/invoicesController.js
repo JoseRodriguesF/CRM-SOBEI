@@ -28,15 +28,39 @@ exports.uploadInvoice = async (req, res) => {
     // 2. Tenta fazer match com unidade e serviço cadastrados
     let unitId = null;
     let serviceId = null;
+    let unitName = 'Sem_Unidade';
+    let svcName = data.service || 'Sem_Servico';
+    let phone = data.phoneNumber || 'Sem_Telefone';
+
     const hasMatchSignals = data.unitCnpj || data.unitAddress || data.contractNumber;
 
     if (hasMatchSignals) {
       const match = await matchUnitAndService(company.id, data);
       if (match.unit) {
         unitId = match.unit.id;
-        serviceId = match.service ? match.service.id : null;
+        unitName = match.unit.name;
+        if (match.service) {
+          serviceId = match.service.id;
+          svcName = match.service.name;
+        }
         console.log(`[IA] Vinculado: Unidade "${match.unit.name}"${match.service ? ` / Serviço "${match.service.name}"` : ''}`);
       }
+    }
+
+    // 2.1. Renomeia o PDF para um nome amigável
+    // Sanitize function for filenames
+    const sanitize = (str) => str ? str.toString().replace(/[^a-z0-9]/gi, '_').substring(0, 50) : '_';
+
+    const newFileName = `${sanitize(unitName)}-${sanitize(svcName)}-${sanitize(phone)}-${Date.now()}.pdf`;
+    const newPath = path.join(path.dirname(pdfPath), newFileName);
+
+    try {
+      fs.renameSync(pdfPath, newPath);
+      // Atualiza o pdfPath para o novo caminho para salvar no banco
+      var finalPdfPath = newPath;
+    } catch (renameErr) {
+      console.error('[invoices] Erro ao renomear arquivo:', renameErr);
+      var finalPdfPath = pdfPath; // Mantém o original se der erro
     }
 
     // 3. Cria a fatura
@@ -51,7 +75,7 @@ exports.uploadInvoice = async (req, res) => {
         dueDate: new Date(data.dueDate + 'T12:00:00'),
         status: data.status,
         serviceName: data.service,
-        pdfPath: path.relative(path.join(__dirname, '..', '..'), pdfPath).replace(/\\/g, '/'),
+        pdfPath: path.relative(path.join(__dirname, '..', '..'), finalPdfPath).replace(/\\/g, '/'),
       },
       include: {
         company: true,

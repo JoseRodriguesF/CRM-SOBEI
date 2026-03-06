@@ -23,6 +23,7 @@ const extractedInvoiceSchema = z.object({
     unitCnpj: z.string().optional().nullable(),
     unitAddress: z.string().optional().nullable(),
     contractNumber: z.string().optional().nullable(),
+    phoneNumber: z.string().optional().nullable(),
     referenceMonth: z.string(),
     totalAmount: z.number(),
     dueDate: z.string(),
@@ -41,6 +42,7 @@ Com base no texto abaixo, retorne APENAS um JSON válido, sem comentários, segu
   "unitCnpj": "string ou null (CNPJ específico da unidade/filial, se diferente do CNPJ da matriz)",
   "unitAddress": "string ou null (endereço completo da unidade/filial mencionado na fatura)",
   "contractNumber": "string ou null (número(s) do contrato associado ao serviço desta fatura)",
+  "phoneNumber": "string ou null (número de telefone principal registrado na fatura, se houver)",
   "referenceMonth": "MM/AAAA",
   "totalAmount": 1234.56,
   "dueDate": "AAAA-MM-DD",
@@ -104,14 +106,30 @@ async function extractInvoiceDataFromPdf(filePath) {
  * Retorna 5 se há sobreposição suficiente, 0 caso contrário.
  */
 function scoreAddress(invoiceAddress, unitAddress) {
-    const normalize = (s) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (!invoiceAddress || !unitAddress) return 0;
+    const normalize = (s) => s.toLowerCase()
+        .replace(/[^a-z0-9]/g, '')
+        .replace(/rua|avenida|av|praca|viela|alameda|rodovia|rod|travessa|trv/g, '');
+
     const addrA = normalize(invoiceAddress);
     const addrB = normalize(unitAddress);
+
     if (addrA.length <= 5 || addrB.length <= 5) return 0;
 
-    const longer = addrA.length > addrB.length ? addrA : addrB;
+    // Correspondência EXATA após normalização
+    if (addrA === addrB) return 25;
+
+    // Correspondência FORTE (uma contém a outra)
+    if (addrA.includes(addrB) || addrB.includes(addrA)) return 20;
+
     const shorter = addrA.length > addrB.length ? addrB : addrA;
-    return longer.includes(shorter.slice(0, Math.min(shorter.length, 20))) ? 5 : 0;
+    const longer = addrA.length > addrB.length ? addrA : addrB;
+
+    // Se coincidir pelo menos 15 caracteres ou 70% da string (o que for menor)
+    const minMatch = Math.min(15, Math.floor(shorter.length * 0.7));
+    if (longer.includes(shorter.slice(0, minMatch))) return 12;
+
+    return 0;
 }
 
 /**
@@ -122,26 +140,20 @@ function scoreServiceName(pdfServiceName, registeredServiceName) {
     const normalize = (s) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
     const a = normalize(pdfServiceName);
     const b = normalize(registeredServiceName);
-    return a.includes(b) || b.includes(a) ? 4 : 0;
+    if (a === b) return 8;
+    return a.includes(b) || b.includes(a) ? 5 : 0;
 }
 
 /**
  * Tenta encontrar a unidade e o serviço cadastrados que melhor correspondem
- * aos dados extraídos da fatura.
- *
- * Pontuação:
- * - Número de contrato (via Service)  → 10 pts (match forte — determinístico)
- * - Nome do serviço                   → +4 pts (bônus)
- * - CNPJ da unidade                   → 10 pts (match forte)
- * - Endereço da unidade               → 5 pts
- * Score mínimo para aceitar: 5
+ * aos dados extraídos da fatura com lógica avançada de desempate.
  *
  * @param {number} companyId
- * @param {{ unitCnpj?, unitAddress?, contractNumber?, service? }} data
+ * @param {{ cnpj, unitCnpj?, unitAddress?, contractNumber?, service? }} data
  * @returns {Promise<{ unit: object|null, service: object|null }>}
  */
 async function matchUnitAndService(companyId, data) {
-    const { unitCnpj, unitAddress, contractNumber, service: pdfServiceName } = data;
+    const { cnpj: mainCnpj, unitCnpj, unitAddress, contractNumber, service: pdfServiceName } = data;
 
     const units = await prisma.unit.findMany({
         where: { companyId },
@@ -150,45 +162,106 @@ async function matchUnitAndService(companyId, data) {
 
     if (!units.length) return { unit: null, service: null };
 
-    let best = { unit: null, service: null, score: 0 };
+    const normMain = normalizeCnpj(mainCnpj);
+    const normUnit = unitCnpj ? normalizeCnpj(unitCnpj) : null;
+
+    // Mapeamento de possíveis matches para avaliação refinada
+    const candidates = [];
 
     for (const unit of units) {
-        const unitCnpjs = parseCnpjs(unit.cnpjs);
+        let score = 0;
+        let matchedSvc = null;
+        let detail = {
+            cnpjMatch: false,
+            unitCnpjMatch: false,
+            addressMatch: 0,
+            contractMatch: false,
+            serviceMatch: 0
+        };
 
-        // ── 1. Match por número de contrato (via serviços) ───────────────────
-        if (contractNumber) {
-            for (const svc of unit.services) {
-                if (!contractsOverlap(contractNumber, svc.contractNumber)) continue;
+        // ── 1. Match por CNPJs ───────────────────────────────────────────────
+        const unitCnpjs = parseCnpjs(unit.cnpjs).map(normalizeCnpj);
 
-                const score = 10 + scoreServiceName(pdfServiceName, svc.name);
-                if (score > best.score) best = { unit, service: svc, score };
-            }
+        // Match com o CNPJ específico da unidade extraído do PDF (Sinal fortíssimo)
+        if (normUnit && unitCnpjs.includes(normUnit)) {
+            score += 20;
+            detail.unitCnpjMatch = true;
+        }
+        // Match com o CNPJ principal da fatura (Sinal comum de faturamento centralizado)
+        else if (unitCnpjs.includes(normMain)) {
+            score += 8;
+            detail.cnpjMatch = true;
         }
 
-        // ── 2. Match por CNPJ da unidade ────────────────────────────────────
-        if (unitCnpj && unitCnpjs.length > 0) {
-            const normalizedInput = normalizeCnpj(unitCnpj);
-            const cnpjHit = unitCnpjs.some((c) => normalizeCnpj(c) === normalizedInput);
-
-            if (cnpjHit) {
-                // Tenta encontrar o serviço por nome
-                const matchedSvc = pdfServiceName
-                    ? unit.services.find((s) => scoreServiceName(pdfServiceName, s.name) > 0) ?? null
-                    : null;
-
-                const score = 10 + (matchedSvc ? 3 : 0);
-                if (score > best.score) best = { unit, service: matchedSvc, score };
-            }
-        }
-
-        // ── 3. Match por endereço ────────────────────────────────────────────
+        // ── 2. Match por Endereço ───────────────────────────────────────────
         if (unitAddress && unit.address) {
-            const score = scoreAddress(unitAddress, unit.address);
-            if (score > best.score) best = { unit, service: null, score };
+            const addrScore = scoreAddress(unitAddress, unit.address);
+            score += addrScore;
+            detail.addressMatch = addrScore;
         }
+
+        // ── 3. Match por Contrato / Serviço ─────────────────────────────────
+        if (contractNumber || pdfServiceName) {
+            let bestSvcScore = 0;
+            let tempMatchedSvc = null;
+
+            for (const svc of unit.services) {
+                let sScore = 0;
+                let cHit = false;
+
+                if (contractNumber && contractsOverlap(contractNumber, svc.contractNumber)) {
+                    sScore += 25; // Contrato é o sinal mais específico da Vivo
+                    cHit = true;
+                }
+
+                const sNameScore = scoreServiceName(pdfServiceName, svc.name);
+                sScore += sNameScore;
+
+                if (sScore > bestSvcScore) {
+                    bestSvcScore = sScore;
+                    tempMatchedSvc = svc;
+                    detail.contractMatch = cHit;
+                    detail.serviceMatch = sNameScore;
+                }
+            }
+
+            score += bestSvcScore;
+            matchedSvc = tempMatchedSvc;
+        }
+
+        // Bônus de "Gold Standard": Se bater Endereço E (CNPJ da Unidade ou Contrato)
+        if (detail.addressMatch >= 12 && (detail.unitCnpjMatch || detail.contractMatch)) {
+            score += 15;
+        }
+
+        candidates.push({ unit, service: matchedSvc, score, detail });
     }
 
-    return best.score >= 5 ? { unit: best.unit, service: best.service } : { unit: null, service: null };
+    // Ordenação com Critérios de Desempate Hierárquicos:
+    // 1. Maior Score Total
+    // 2. Desempate: Quem teve match de CONTRATO (Sinal mais proprietário e único)
+    // 3. Desempate: Quem teve match de CNPJ ESPECÍFICO da Unidade
+    // 4. Desempate: Quem teve maior score de Endereço
+    // 5. Desempate: Se tudo falhar, maior score de nome do Serviço
+    candidates.sort((a, b) => {
+        if (b.score !== a.score) return b.score - a.score;
+        if (b.detail.contractMatch !== a.detail.contractMatch) return b.detail.contractMatch ? 1 : -1;
+        if (b.detail.unitCnpjMatch !== a.detail.unitCnpjMatch) return b.detail.unitCnpjMatch ? 1 : -1;
+        if (b.detail.addressMatch !== a.detail.addressMatch) return b.detail.addressMatch - a.detail.addressMatch;
+        return b.detail.serviceMatch - a.detail.serviceMatch;
+    });
+
+    const best = candidates[0];
+
+    // Logging para monitoramento de decisões da IA
+    if (best && best.score >= 5) {
+        if (candidates.length > 1 && candidates[1].score >= best.score - 2) {
+            console.log(`[IA-Match] Desempate aplicado: "${best.unit.name}" venceu "${candidates[1].unit.name}" nos critérios de detalhe.`);
+        }
+        return { unit: best.unit, service: best.service };
+    }
+
+    return { unit: null, service: null };
 }
 
 module.exports = { extractInvoiceDataFromPdf, matchUnitAndService };
