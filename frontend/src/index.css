@@ -541,6 +541,12 @@ body {
 .table-scroll {
   max-height: 420px;
   overflow: auto;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.table-scroll::-webkit-scrollbar {
+  display: none;
 }
 
 .table {

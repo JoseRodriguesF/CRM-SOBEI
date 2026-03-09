@@ -106,6 +106,22 @@ export function InvoicesPage({ addToast }) {
         }
     };
 
+    const handleDeleteSelected = async () => {
+        if (!window.confirm(`Excluir as ${selectedIds.length} faturas selecionadas permanentemente?`)) return;
+        setLoading(true);
+        try {
+            await Promise.all(selectedIds.map(id => api.invoices.delete(id)));
+            setInvoices(invoices.filter(i => !selectedIds.includes(i.id)));
+            setSelectedIds([]);
+            addToast('Faturas selecionadas excluídas.', 'info');
+            loadSummary();
+        } catch (err) {
+            addToast(err.message, 'error');
+        } finally {
+            setLoading(false);
+        }
+    };
+
     const handleStatusChange = async (id, newStatus) => {
         try {
             const updated = await api.invoices.updateStatus(id, newStatus);
@@ -338,8 +354,16 @@ export function InvoicesPage({ addToast }) {
                         </thead>
                         <tbody>
                             {invoices.map((inv, idx) => (
-                                <tr key={`${inv.id || 'new'}-${idx}-${inv.createdAt}`}>
-                                    <td>
+                                <tr
+                                    key={`${inv.id || 'new'}-${idx}-${inv.createdAt}`}
+                                    onClick={(e) => {
+                                        if (e.target.tagName.toLowerCase() === 'button' || e.target.tagName.toLowerCase() === 'a' || e.target.closest('button')) return;
+                                        toggleSelect(inv.id);
+                                    }}
+                                    style={{ cursor: 'pointer' }}
+                                    className={selectedIds.includes(inv.id) ? 'row-selected' : ''}
+                                >
+                                    <td onClick={(e) => e.stopPropagation()}>
                                         <input
                                             type="checkbox"
                                             checked={selectedIds.includes(inv.id)}
@@ -379,8 +403,17 @@ export function InvoicesPage({ addToast }) {
             </div>
 
             {selectedIds.length > 0 && (
-                <div className="selection-hint" style={{ color: 'var(--accent)', fontWeight: 600 }}>
-                    {selectedIds.length} fatura{selectedIds.length > 1 ? 's' : ''} selecionada{selectedIds.length > 1 ? 's' : ''}
+                <div className="selection-hint" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 16px', background: 'rgba(15, 23, 42, 0.65)', borderRadius: '12px', marginTop: '12px', border: '1px solid rgba(14, 165, 233, 0.3)' }}>
+                    <div style={{ color: 'var(--accent)', fontWeight: 600 }}>
+                        {selectedIds.length} fatura{selectedIds.length > 1 ? 's' : ''} selecionada{selectedIds.length > 1 ? 's' : ''}
+                    </div>
+                    <button
+                        className="btn"
+                        style={{ backgroundColor: 'var(--danger)', color: '#fff', boxShadow: '0 4px 14px rgba(248, 113, 113, 0.3)' }}
+                        onClick={handleDeleteSelected}
+                    >
+                        🗑 Excluir Selecionadas
+                    </button>
                 </div>
             )}
 

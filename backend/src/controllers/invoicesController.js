@@ -42,15 +42,15 @@ exports.uploadInvoice = async (req, res) => {
     let finalCompanyId = null;
 
     console.log(`[IA-Debug] Sinais encontrados: unitId=${data.unitId}, contractNumber=${data.contractNumber}`);
-    
+
     // Tenta fazer o match local
     const match = localDoubleCheckMatch(data, companyUnits);
-    
+
     if (match.unit) {
       unitId = match.unit.id;
       unitName = match.unit.name;
       finalCompanyId = match.unit.companyId; // Se achou a unidade, a fatura pertence à empresa DAQUELA unidade!
-      
+
       if (match.service) {
         serviceId = match.service.id;
         svcName = match.service.name;
@@ -60,13 +60,16 @@ exports.uploadInvoice = async (req, res) => {
     } else {
       matchDebug = match.debug;
       console.log('[IA] Nenhum match de Unidade encontrado.');
-      
+
       // Se NÃO achou unidade, não tem como a fatura ficar pendente de unidade sem aprovação.
       // E como a regra de negócio atual diz que ela nunca deve ser criada se for "Unidade Não Identificada",
       // bloqueamos agora o processo inteiramente. 
-      return res.status(400).json({ 
-          error: 'Esta fatura não corresponde a nenhuma unidade (ou serviço/contrato) atualmente cadastrada no banco de dados. Cadastre sua Unidade no painel antes de subir faturas para ela.',
-          debug: matchDebug
+      if (fs.existsSync(pdfPath)) {
+        fs.unlinkSync(pdfPath);
+      }
+      return res.status(400).json({
+        error: 'Esta fatura não corresponde a nenhuma unidade (ou serviço/contrato) atualmente cadastrada no banco de dados. Cadastre sua Unidade no painel antes de subir faturas para ela.',
+        debug: matchDebug
       });
     }
 
@@ -114,6 +117,9 @@ exports.uploadInvoice = async (req, res) => {
       debug: matchDebug
     });
   } catch (err) {
+    if (req.file && fs.existsSync(req.file.path)) {
+      fs.unlinkSync(req.file.path);
+    }
     console.error('[invoices] uploadInvoice:', err);
     return res.status(500).json({ error: 'Erro ao processar fatura.', details: err.message });
   }
