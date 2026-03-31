@@ -1,9 +1,16 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { api } from '../api';
 import { MultiCnpjInput } from '../components/MultiCnpjInput';
 import { ServicesPanel } from '../components/ServicesPanel';
 import { ConfirmModal } from '../components/ConfirmModal';
 import { IMaskInput } from 'react-imask';
+
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+const EMPTY_FORM = { name: '', cnpjs: [], address: '', companyCnpj: '', companyName: '' };
+const EMPTY_CONFIRM = { show: false, unitId: null, unitName: '' };
+
+// ─── Component ────────────────────────────────────────────────────────────────
 
 export function UnitsPage({ addToast }) {
     const [units, setUnits] = useState([]);
@@ -11,22 +18,10 @@ export function UnitsPage({ addToast }) {
     const [showModal, setShowModal] = useState(false);
     const [expandedUnit, setExpandedUnit] = useState(null);
     const [editingUnit, setEditingUnit] = useState(null);
+    const [form, setForm] = useState(EMPTY_FORM);
+    const [confirmDelete, setConfirmDelete] = useState(EMPTY_CONFIRM);
 
-    const [form, setForm] = useState({
-        name: '',
-        cnpjs: [],
-        address: '',
-        companyCnpj: '',
-        companyName: ''
-    });
-
-    const [confirmDelete, setConfirmDelete] = useState({ show: false, unitId: null, unitName: '' });
-
-    useEffect(() => {
-        loadUnits();
-    }, []);
-
-    const loadUnits = async () => {
+    const loadUnits = useCallback(async () => {
         setLoading(true);
         try {
             const data = await api.units.list();
@@ -36,27 +31,29 @@ export function UnitsPage({ addToast }) {
         } finally {
             setLoading(false);
         }
-    };
+    }, [addToast]);
 
-    const handleOpenCreate = () => {
+    useEffect(() => { loadUnits(); }, [loadUnits]);
+
+    const handleOpenCreate = useCallback(() => {
         setEditingUnit(null);
-        setForm({ name: '', cnpjs: [], address: '', companyCnpj: '', companyName: '' });
+        setForm(EMPTY_FORM);
         setShowModal(true);
-    };
+    }, []);
 
-    const handleOpenEdit = (unit) => {
+    const handleOpenEdit = useCallback((unit) => {
         setEditingUnit(unit);
         setForm({
             name: unit.name,
             cnpjs: unit.cnpjs || [],
             address: unit.address || '',
             companyCnpj: unit.company?.cnpj || '',
-            companyName: unit.company?.name || ''
+            companyName: unit.company?.name || '',
         });
         setShowModal(true);
-    };
+    }, []);
 
-    const handleSave = async (e) => {
+    const handleSave = useCallback(async (e) => {
         e.preventDefault();
         try {
             if (editingUnit) {
@@ -71,18 +68,23 @@ export function UnitsPage({ addToast }) {
         } catch (err) {
             addToast(err.message, 'error');
         }
-    };
+    }, [editingUnit, form, addToast, loadUnits]);
 
-    const handleConfirmDelete = async () => {
+    const handleConfirmDelete = useCallback(async () => {
         try {
             await api.units.delete(confirmDelete.unitId);
             addToast('Unidade removida.', 'info');
-            setConfirmDelete({ show: false, unitId: null, unitName: '' });
+            setConfirmDelete(EMPTY_CONFIRM);
             loadUnits();
         } catch (err) {
             addToast(err.message, 'error');
         }
-    };
+    }, [confirmDelete.unitId, addToast, loadUnits]);
+
+    const closeModal = useCallback(() => setShowModal(false), []);
+    const cancelDelete = useCallback(() => setConfirmDelete(EMPTY_CONFIRM), []);
+    const toggleExpanded = useCallback((unitId) =>
+        setExpandedUnit(prev => prev === unitId ? null : unitId), []);
 
     return (
         <div className="units-page">
@@ -113,13 +115,17 @@ export function UnitsPage({ addToast }) {
                                 <div className="unit-card-icon">🏢</div>
                                 <div className="unit-card-info">
                                     <div className="unit-card-title-row">
-                                        <h3 className="unit-card-name">{unit.name}</h3>
-                                        <span className={`match-badge ${unit.cnpjs?.length > 0 && unit.services?.length > 0 ? 'match-badge--active' : 'match-badge--missing'}`}
-                                            title={unit.cnpjs?.length > 0 && unit.services?.length > 0 ? 'Pronta para identificação via IA' : 'Faltam dados para identificação automática'}>
+                                    <h3 className="unit-card-name">{unit.name}</h3>
+                                        <span
+                                            className={`match-badge ${unit.cnpjs?.length > 0 && unit.services?.length > 0 ? 'match-badge--active' : 'match-badge--missing'}`}
+                                            title={unit.cnpjs?.length > 0 && unit.services?.length > 0
+                                                ? 'Pronta para identificação via IA'
+                                                : 'Faltam dados para identificação automática'}
+                                        >
                                             {unit.cnpjs?.length > 0 && unit.services?.length > 0 ? 'Auto-match Ativo' : 'Match Incompleto'}
                                         </span>
                                     </div>
-                                    <span className="unit-card-company">{unit.company?.name}</span>
+                                    <span className="unit-card-company">{formatCompanyName(unit.company?.name)}</span>
                                 </div>
                             </div>
 
@@ -127,11 +133,10 @@ export function UnitsPage({ addToast }) {
                                 <div className="unit-field-row">
                                     <span className="unit-field-key">CNPJ(s) da Unidade</span>
                                     <div className="multi-cnpj-tags" style={{ border: 'none', background: 'transparent', padding: 0 }}>
-                                        {unit.cnpjs?.length > 0 ? (
-                                            unit.cnpjs.map((c, i) => <span key={i} className="cnpj-tag">{c}</span>)
-                                        ) : (
-                                            <span className="unit-no-data">Nenhum CNPJ específico</span>
-                                        )}
+                                        {unit.cnpjs?.length > 0
+                                            ? unit.cnpjs.map((c, i) => <span key={`${c}-${i}`} className="cnpj-tag">{c}</span>)
+                                            : <span className="unit-no-data">Nenhum CNPJ específico</span>
+                                        }
                                     </div>
                                 </div>
                                 <div className="unit-field-row">
@@ -148,10 +153,7 @@ export function UnitsPage({ addToast }) {
 
                             <div className="unit-card-actions">
                                 <button className="btn-outline-sm" onClick={() => handleOpenEdit(unit)}>Editar</button>
-                                <button
-                                    className="btn-outline-sm"
-                                    onClick={() => setExpandedUnit(expandedUnit === unit.id ? null : unit.id)}
-                                >
+                                <button className="btn-outline-sm" onClick={() => toggleExpanded(unit.id)}>
                                     {expandedUnit === unit.id ? 'Fechar Serviços' : 'Ver Serviços'}
                                 </button>
                                 <button
@@ -178,7 +180,7 @@ export function UnitsPage({ addToast }) {
                     <div className="modal-box modal-box--wide">
                         <div className="modal-header">
                             <h3 className="modal-title">{editingUnit ? 'Editar Unidade' : 'Nova Unidade'}</h3>
-                            <button className="modal-close" onClick={() => setShowModal(false)}>×</button>
+                            <button className="modal-close" onClick={closeModal}>×</button>
                         </div>
                         <form className="unit-form" onSubmit={handleSave}>
                             <div className="unit-form-grid">
@@ -188,7 +190,7 @@ export function UnitsPage({ addToast }) {
                                         className="field-input"
                                         placeholder="Ex: Filial São Paulo, Nome do PDV..."
                                         value={form.name}
-                                        onChange={(e) => setForm({ ...form, name: e.target.value })}
+                                        onChange={(e) => setForm(f => ({ ...f, name: e.target.value }))}
                                         required
                                     />
                                 </div>
@@ -197,7 +199,7 @@ export function UnitsPage({ addToast }) {
                                     <label className="field-label">CNPJs Associados (exclusivos desta unidade)</label>
                                     <MultiCnpjInput
                                         cnpjs={form.cnpjs}
-                                        onChange={(val) => setForm({ ...form, cnpjs: val })}
+                                        onChange={(val) => setForm(f => ({ ...f, cnpjs: val }))}
                                     />
                                     <span className="field-hint">Adicione os CNPJs que aparecem nas faturas desta unidade específica.</span>
                                 </div>
@@ -209,7 +211,7 @@ export function UnitsPage({ addToast }) {
                                         rows="2"
                                         placeholder="Rua, Número, Bairro, Cidade..."
                                         value={form.address}
-                                        onChange={(e) => setForm({ ...form, address: e.target.value })}
+                                        onChange={(e) => setForm(f => ({ ...f, address: e.target.value }))}
                                     />
                                 </div>
 
@@ -222,7 +224,7 @@ export function UnitsPage({ addToast }) {
                                                 className="field-input"
                                                 placeholder="00.000.000/0000-00"
                                                 value={form.companyCnpj}
-                                                onAccept={(val) => setForm({ ...form, companyCnpj: val })}
+                                                onAccept={(val) => setForm(f => ({ ...f, companyCnpj: val }))}
                                                 required
                                             />
                                         </div>
@@ -232,7 +234,7 @@ export function UnitsPage({ addToast }) {
                                                 className="field-input"
                                                 placeholder="Razão Social"
                                                 value={form.companyName}
-                                                onChange={(e) => setForm({ ...form, companyName: e.target.value })}
+                                                onChange={(e) => setForm(f => ({ ...f, companyName: e.target.value }))}
                                             />
                                         </div>
                                     </>
@@ -247,7 +249,7 @@ export function UnitsPage({ addToast }) {
                             </div>
 
                             <div className="unit-form-actions">
-                                <button type="button" className="btn btn-ghost" onClick={() => setShowModal(false)}>Cancelar</button>
+                                <button type="button" className="btn btn-ghost" onClick={closeModal}>Cancelar</button>
                                 <button type="submit" className="btn btn-primary">
                                     {editingUnit ? 'Salvar Alterações' : 'Criar Unidade'}
                                 </button>
@@ -257,14 +259,19 @@ export function UnitsPage({ addToast }) {
                 </div>
             )}
 
-            {/* Confirmação de Exclusão */}
             <ConfirmModal
                 show={confirmDelete.show}
                 title="Excluir Unidade?"
                 message={`Deseja realmente excluir a unidade "${confirmDelete.unitName}"? Isso desvinculará faturas e excluirá todos os serviços cadastrados para ela.`}
                 onConfirm={handleConfirmDelete}
-                onCancel={() => setConfirmDelete({ show: false, unitId: null, unitName: '' })}
+                onCancel={cancelDelete}
             />
         </div>
     );
+}
+
+function formatCompanyName(name) {
+    if (!name) return '-';
+    if (name.toUpperCase() === 'SOCIEDADE BENEFICENTE EQUILIBRIO DE INTERLAGOS') return 'SOBEI';
+    return name;
 }

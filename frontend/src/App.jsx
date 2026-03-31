@@ -1,24 +1,43 @@
-import React from 'react';
 import { Routes, Route, useNavigate, useLocation } from 'react-router-dom';
-
-// Pages
 import { Dashboard } from './pages/Dashboard';
 import { UnitsPage } from './pages/UnitsPage';
 import { InvoicesPage } from './pages/InvoicesPage';
+import { ToastContainer } from './components/Toast';
+import { useToasts } from './hooks/useToasts';
 
-// Components
-import { ToastContainer, useToasts } from './components/Toast';
+const ROUTES = [
+  {
+    path: '/',
+    element: Dashboard,
+    label: 'Dashboard',
+    title: 'Visão Geral',
+    subtitle: 'Acompanhe os principais indicadores de gasto e vencimentos de toda a sua rede.',
+  },
+  {
+    path: '/invoices',
+    element: InvoicesPage,
+    label: 'Faturas',
+    title: 'Central de Faturas',
+    subtitle: 'Gerencie todas as faturas digitais, realize uploads com extração automática via IA e envie relatórios.',
+  },
+  {
+    path: '/units',
+    element: UnitsPage,
+    label: 'Unidades',
+    title: 'Gestão de Unidades',
+    subtitle: 'Cadastre e gerencie suas unidades, filiais e os serviços/contratos vinculados a cada uma.',
+  },
+];
 
 export default function App() {
   const navigate = useNavigate();
   const location = useLocation();
   const { toasts, addToast, removeToast } = useToasts();
 
-  const currentPath = location.pathname;
+  const currentRoute = ROUTES.find(r => r.path === location.pathname) ?? ROUTES[0];
 
   return (
     <div className="app-shell">
-      {/* Top Navigation Bar */}
       <div className="top-bar-shell">
         <header className="top-bar">
           <div className="top-bar-left">
@@ -30,54 +49,35 @@ export default function App() {
 
           <div className="top-bar-right">
             <nav className="top-nav">
-              <button
-                className={`top-nav-item ${currentPath === '/' ? 'top-nav-item--active' : ''}`}
-                onClick={() => navigate('/')}
-              >
-                Dashboard
-              </button>
-              <button
-                className={`top-nav-item ${currentPath === '/invoices' ? 'top-nav-item--active' : ''}`}
-                onClick={() => navigate('/invoices')}
-              >
-                Faturas
-              </button>
-              <button
-                className={`top-nav-item ${currentPath === '/units' ? 'top-nav-item--active' : ''}`}
-                onClick={() => navigate('/units')}
-              >
-                Unidades
-              </button>
+              {ROUTES.map(route => (
+                <button
+                  key={route.path}
+                  className={`top-nav-item ${location.pathname === route.path ? 'top-nav-item--active' : ''}`}
+                  onClick={() => navigate(route.path)}
+                >
+                  {route.label}
+                </button>
+              ))}
             </nav>
           </div>
         </header>
       </div>
 
       <main className="app-container">
-        {/* Header Dinâmico */}
         <div className="app-header">
-          <h1 className="app-title">
-            {currentPath === '/' ? 'Visão Geral' : currentPath === '/units' ? 'Gestão de Unidades' : 'Central de Faturas'}
-          </h1>
-          <p className="app-subtitle">
-            {currentPath === '/'
-              ? 'Acompanhe os principais indicadores de gasto e vencimentos de toda a sua rede.'
-              : currentPath === '/units'
-                ? 'Cadastre e gerencie suas unidades, filiais e os serviços/contratos vinculados a cada uma.'
-                : 'Gerencie todas as faturas digitais, realize uploads com extração automática via IA e envie relatórios.'}
-          </p>
+          <h1 className="app-title">{currentRoute.title}</h1>
+          <p className="app-subtitle">{currentRoute.subtitle}</p>
         </div>
 
-        {/* Conteúdo da Página */}
         <Routes>
-          <Route path="/" element={<Dashboard addToast={addToast} />} />
-          <Route path="/invoices" element={<InvoicesPage addToast={addToast} />} />
-          <Route path="/units" element={<UnitsPage addToast={addToast} />} />
+          {ROUTES.map((route) => {
+            const Component = route.element;
+            return <Route key={route.path} path={route.path} element={<Component addToast={addToast} />} />;
+          })}
           <Route path="*" element={<Dashboard addToast={addToast} />} />
         </Routes>
       </main>
 
-      {/* Notificações Toasts */}
       <ToastContainer toasts={toasts} removeToast={removeToast} />
     </div>
   );

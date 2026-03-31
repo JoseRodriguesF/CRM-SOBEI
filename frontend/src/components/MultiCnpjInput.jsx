@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { IMaskInput } from 'react-imask';
 
 /**
@@ -8,25 +8,17 @@ export function MultiCnpjInput({ cnpjs = [], onChange }) {
     const [inputValue, setInputValue] = useState('');
 
     const addCnpj = () => {
-        if (!inputValue) return;
-
-        if (!cnpjs.includes(inputValue)) {
-            onChange([...cnpjs, inputValue]);
-        }
+        if (!inputValue || cnpjs.includes(inputValue)) return;
+        onChange([...cnpjs, inputValue]);
         setInputValue('');
     };
 
     const removeCnpj = (index) => {
-        const newCnpjs = [...cnpjs];
-        newCnpjs.splice(index, 1);
-        onChange(newCnpjs);
+        onChange(cnpjs.filter((_, i) => i !== index));
     };
 
     const handleKeyDown = (e) => {
-        if (e.key === 'Enter') {
-            e.preventDefault();
-            addCnpj();
-        }
+        if (e.key === 'Enter') { e.preventDefault(); addCnpj(); }
     };
 
     return (

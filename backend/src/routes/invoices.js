@@ -9,29 +9,39 @@ const router = express.Router();
 
 const uploadDir = path.join(__dirname, '..', '..', 'uploads');
 
-// garante que a pasta de uploads existe
+// Garante que a pasta de uploads existe
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
 }
 
 const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, uploadDir);
-  },
-  filename: (req, file, cb) => {
-    const unique = Date.now() + '-' + Math.round(Math.random() * 1e9);
+  destination: (_req, _file, cb) => cb(null, uploadDir),
+  filename: (_req, file, cb) => {
+    const unique = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
     cb(null, `${unique}-${file.originalname}`);
   },
 });
 
-const upload = multer({ storage });
+/** Rejeita uploads que não sejam PDFs. */
+const fileFilter = (_req, file, cb) => {
+  if (file.mimetype === 'application/pdf') {
+    cb(null, true);
+  } else {
+    cb(new Error('Apenas arquivos PDF são permitidos.'), false);
+  }
+};
+
+const upload = multer({
+  storage,
+  fileFilter,
+  limits: { fileSize: 20 * 1024 * 1024 }, // 20 MB
+});
 
 router.post('/upload', upload.single('file'), invoicesController.uploadInvoice);
 router.get('/', invoicesController.listInvoices);
 router.get('/dashboard', invoicesController.getDashboard);
-router.post('/send-email', invoicesController.sendInvoicesEmail);
+router.get('/download-zip', invoicesController.downloadInvoicesZip);
 router.delete('/:id', invoicesController.deleteInvoice);
 router.patch('/:id/status', invoicesController.updateInvoiceStatus);
 
 module.exports = router;
-

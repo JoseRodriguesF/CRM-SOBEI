@@ -1,5 +1,11 @@
-import React, { useState } from 'react';
+import { useState, useCallback } from 'react';
 import { api } from '../api';
+
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+const EMPTY_FORM = { name: '', contractNumber: '' };
+
+// ─── Component ────────────────────────────────────────────────────────────────
 
 /**
  * Painel interno ao card da unidade para gerenciar serviços (Nome e Contrato).
@@ -7,22 +13,22 @@ import { api } from '../api';
 export function ServicesPanel({ unit, onUpdate, addToast }) {
     const [isAdding, setIsAdding] = useState(false);
     const [editingId, setEditingId] = useState(null);
-    const [form, setForm] = useState({ name: '', contractNumber: '' });
+    const [form, setForm] = useState(EMPTY_FORM);
     const [loading, setLoading] = useState(false);
 
-    const resetForm = () => {
-        setForm({ name: '', contractNumber: '' });
+    const resetForm = useCallback(() => {
+        setForm(EMPTY_FORM);
         setIsAdding(false);
         setEditingId(null);
-    };
+    }, []);
 
-    const startEdit = (svc) => {
+    const startEdit = useCallback((svc) => {
         setForm({ name: svc.name, contractNumber: svc.contractNumber });
         setEditingId(svc.id);
         setIsAdding(false);
-    };
+    }, []);
 
-    const handleSave = async (e) => {
+    const handleSave = useCallback(async (e) => {
         e.preventDefault();
         if (!form.name || !form.contractNumber) return;
         setLoading(true);
@@ -36,15 +42,15 @@ export function ServicesPanel({ unit, onUpdate, addToast }) {
                 addToast('Serviço adicionado!', 'success');
             }
             resetForm();
-            onUpdate(); // Recarrega unidades no pai
+            onUpdate();
         } catch (err) {
             addToast(err.message, 'error');
         } finally {
             setLoading(false);
         }
-    };
+    }, [form, editingId, unit.id, addToast, resetForm, onUpdate]);
 
-    const handleDelete = async (svcId) => {
+    const handleDelete = useCallback(async (svcId) => {
         if (!window.confirm('Excluir este serviço?')) return;
         setLoading(true);
         try {
@@ -56,7 +62,7 @@ export function ServicesPanel({ unit, onUpdate, addToast }) {
         } finally {
             setLoading(false);
         }
-    };
+    }, [unit.id, addToast, onUpdate]);
 
     return (
         <div className="services-panel">
@@ -78,7 +84,7 @@ export function ServicesPanel({ unit, onUpdate, addToast }) {
                                 className="field-input"
                                 placeholder="Ex: Móvel, Fibra..."
                                 value={form.name}
-                                onChange={(e) => setForm({ ...form, name: e.target.value })}
+                                onChange={(e) => setForm(f => ({ ...f, name: e.target.value }))}
                                 required
                             />
                         </div>
@@ -88,7 +94,7 @@ export function ServicesPanel({ unit, onUpdate, addToast }) {
                                 className="field-input"
                                 placeholder="Ex: 89901234"
                                 value={form.contractNumber}
-                                onChange={(e) => setForm({ ...form, contractNumber: e.target.value })}
+                                onChange={(e) => setForm(f => ({ ...f, contractNumber: e.target.value }))}
                                 required
                             />
                         </div>

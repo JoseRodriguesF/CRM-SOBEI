@@ -1,60 +1,95 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { api } from '../api';
 import { CustomSelect } from '../components/CustomSelect';
+import { ConfirmModal } from '../components/ConfirmModal';
 import { IMaskInput } from 'react-imask';
+
+// ─── Pure Helpers ─────────────────────────────────────────────────────────────
+
+const BASE_URL = import.meta.env.VITE_API_URL?.replace('/api', '') ?? '';
+
+const INITIAL_FILTERS = { cnpj: '', month: '', status: '', unitId: '', service: '' };
+
+function formatCompanyName(name) {
+    if (!name) return '-';
+    if (name.toUpperCase() === 'SOCIEDADE BENEFICENTE EQUILIBRIO DE INTERLAGOS') return 'SOBEI';
+    return name;
+}
+
+function getStatusLabel(inv) {
+    if (inv.status === 'PAGA') return 'PAGA';
+    return new Date(inv.dueDate) < new Date() ? 'ATRASADA' : 'EM ABERTO';
+}
+
+function getStatusClass(inv) {
+    if (inv.status === 'PAGA') return 'paga';
+    return new Date(inv.dueDate) < new Date() ? 'atrasada' : 'pendente';
+}
+
+function formatCurrency(amount) {
+    return Number(amount).toLocaleString('pt-BR', { minimumFractionDigits: 2 });
+}
+
+function displayService(inv) {
+    if (inv.service) {
+        return (
+            <div className="table-cell-group">
+                <div className="table-cell-main">{inv.service.name}</div>
+                <div className="table-cell-sub">Contrato: {inv.service.contractNumber}</div>
+            </div>
+        );
+    }
+
+    let name = inv.serviceName || '-';
+    let contract = inv.contractNumber || '';
+
+    if (name.startsWith('[CONTRATO:')) {
+        const match = name.match(/\[CONTRATO:\s*(.*?)\]\s*(.*)/);
+        if (match) { contract = match[1]; name = match[2]; }
+    }
+
+    return (
+        <div className="table-cell-group">
+            <div className="table-cell-main">{name}</div>
+            {contract && <div className="table-cell-sub">Contrato: {contract}</div>}
+        </div>
+    );
+}
+
+// ─── Component ────────────────────────────────────────────────────────────────
 
 export function InvoicesPage({ addToast }) {
     const [invoices, setInvoices] = useState([]);
     const [units, setUnits] = useState([]);
     const [loading, setLoading] = useState(false);
     const [uploading, setUploading] = useState(false);
-    const [sendingEmail, setSendingEmail] = useState(false);
-
-    // Email State (Mais completo conforme pedido)
-    const [emailData, setEmailData] = useState({
-        to: '',
-        subject: 'Faturas Vivo Empresas'
-    });
-
-    // Selection State (Restaurado)
     const [selectedIds, setSelectedIds] = useState([]);
-
-    // Summary State (Visão Geral restaurada)
     const [summary, setSummary] = useState(null);
+    const [filters, setFilters] = useState(INITIAL_FILTERS);
+    const [uploadQueue, setUploadQueue] = useState([]);
 
-    const [filters, setFilters] = useState({
-        cnpj: '',
-        month: '',
-        status: '',
-        unitId: '',
-        service: ''
-    });
+    // Estado para o Modal de Pagamento
+    const [paymentModal, setPaymentModal] = useState({ show: false, invoice: null, date: new Date().toISOString().split('T')[0] });
 
-    useEffect(() => {
-        loadInvoices();
-        loadUnits();
-        loadSummary();
-    }, [filters]);
-
-    const loadUnits = async () => {
+    const loadUnits = useCallback(async () => {
         try {
             const data = await api.units.list();
             setUnits(data);
         } catch (err) {
-            console.error(err);
+            console.error('[InvoicesPage] loadUnits:', err);
         }
-    };
+    }, []);
 
-    const loadSummary = async () => {
+    const loadSummary = useCallback(async () => {
         try {
             const data = await api.invoices.dashboard(filters);
             setSummary(data);
         } catch (err) {
-            console.error(err);
+            console.error('[InvoicesPage] loadSummary:', err);
         }
-    };
+    }, [filters]);
 
-    const loadInvoices = async () => {
+    const loadInvoices = useCallback(async () => {
         setLoading(true);
         try {
             const data = await api.invoices.list(filters);
@@ -64,54 +99,101 @@ export function InvoicesPage({ addToast }) {
         } finally {
             setLoading(false);
         }
-    };
+    }, [filters, addToast]);
 
-    const handleFileUpload = async (e) => {
-        const file = e.target.files[0];
-        if (!file) return;
+    useEffect(() => {
+        loadInvoices();
+        loadUnits();
+        loadSummary();
+    }, [loadInvoices, loadUnits, loadSummary]);
 
-        setUploading(true);
-        addToast('Analisando fatura via IA...', 'info');
+    const onClearSelection = useCallback(() => setSelectedIds([]), []);
 
-        try {
-            const newInvoice = await api.invoices.upload(file);
-            console.log('[IA-Match] Resposta da API:', newInvoice);
-            // Ao invés de concatenar, recarregamos para manter ordem e filtros
-            await loadInvoices();
-            addToast('Fatura processada com sucesso!', 'success');
-            loadSummary();
+    // Processador da Fila
+    useEffect(() => {
+        const processNext = async () => {
+            if (uploading) return;
+            const nextIndex = uploadQueue.findIndex(item => item.status === 'pending');
+            if (nextIndex === -1) return;
 
-            if (!newInvoice.unitId) {
-                console.warn('[IA-Match] Unidade não identificada:', newInvoice);
-                addToast('Aviso: Unidade não identificada automaticamente.', 'info');
+            setUploading(true);
+            const item = uploadQueue[nextIndex];
+
+            setUploadQueue(prev => prev.map((it, idx) =>
+                idx === nextIndex ? { ...it, status: 'processing' } : it
+            ));
+
+            try {
+                const result = await api.invoices.upload(item.file);
+
+                setUploadQueue(prev => prev.map((it, idx) =>
+                    idx === nextIndex ? { ...it, status: 'done', result } : it
+                ));
+
+                addToast(`Fatura ${item.file.name} processada!`, 'success');
+                loadInvoices();
+                loadSummary();
+            } catch (err) {
+                console.error(`[Queue] Erro em ${item.file.name}:`, err);
+                setUploadQueue(prev => prev.map((it, idx) =>
+                    idx === nextIndex ? { ...it, status: 'error', error: err.message } : it
+                ));
+                addToast(`Erro ao processar ${item.file.name}: ${err.message}`, 'error');
+            } finally {
+                setUploading(false);
             }
-        } catch (err) {
-            addToast(`Erro: ${err.message}`, 'error');
-        } finally {
-            setUploading(false);
-            e.target.value = '';
-        }
+        };
+
+        processNext();
+    }, [uploadQueue, uploading, loadInvoices, loadSummary, addToast]);
+
+    const handleFileUpload = useCallback((e) => {
+        const files = Array.from(e.target.files);
+        if (files.length === 0) return;
+
+        const newItems = files.map(file => ({
+            id: `${Date.now()}-${Math.random()}`,
+            file,
+            status: 'pending'
+        }));
+
+        setUploadQueue(prev => [...prev, ...newItems]);
+        addToast(`${files.length} arquivo(s) adicionado(s) à fila.`, 'info');
+        e.target.value = '';
+    }, [addToast]);
+
+    const clearFinishedQueue = () => {
+        setUploadQueue(prev => prev.filter(item => item.status === 'pending' || item.status === 'processing'));
     };
 
-    const handleDelete = async (id) => {
+    const clearQueue = () => {
+        if (!window.confirm('Limpar toda a fila? Isso interromperá processamentos pendentes.')) return;
+        setUploadQueue([]);
+    };
+
+    const removeFromQueue = (id) => {
+        setUploadQueue(prev => prev.filter(item => item.id !== id));
+    };
+
+    const handleDelete = useCallback(async (id) => {
         if (!window.confirm('Excluir esta fatura permanentemente?')) return;
         try {
             await api.invoices.delete(id);
-            setInvoices(invoices.filter(i => i.id !== id));
-            setSelectedIds(selectedIds.filter(sid => sid !== id));
+            setInvoices(prev => prev.filter(i => i.id !== id));
+            setSelectedIds(prev => prev.filter(sid => sid !== id));
             addToast('Fatura excluída.', 'info');
             loadSummary();
         } catch (err) {
             addToast(err.message, 'error');
         }
-    };
+    }, [addToast, loadSummary]);
 
-    const handleDeleteSelected = async () => {
+    const handleDeleteSelected = useCallback(async () => {
         if (!window.confirm(`Excluir as ${selectedIds.length} faturas selecionadas permanentemente?`)) return;
         setLoading(true);
         try {
             await Promise.all(selectedIds.map(id => api.invoices.delete(id)));
-            setInvoices(invoices.filter(i => !selectedIds.includes(i.id)));
+            setInvoices(prev => prev.filter(i => !selectedIds.includes(i.id)));
             setSelectedIds([]);
             addToast('Faturas selecionadas excluídas.', 'info');
             loadSummary();
@@ -120,90 +202,53 @@ export function InvoicesPage({ addToast }) {
         } finally {
             setLoading(false);
         }
+    }, [selectedIds, addToast, loadSummary]);
+
+    const handleDownloadSelected = useCallback(() => {
+        if (selectedIds.length === 0) return;
+        const ids = selectedIds.join(',');
+        window.open(`${BASE_URL}/api/invoices/download-zip?ids=${ids}`, '_blank');
+    }, [selectedIds]);
+
+    const handleOpenPaymentModal = (invoice) => {
+        setPaymentModal({
+            show: true,
+            invoice,
+            date: new Date().toISOString().split('T')[0]
+        });
     };
 
-    const handleStatusChange = async (id, newStatus) => {
+    const handleConfirmPayment = async () => {
+        const { invoice, date } = paymentModal;
+        if (!invoice) return;
+
+        setLoading(true);
         try {
-            const updated = await api.invoices.updateStatus(id, newStatus);
-            setInvoices(invoices.map(i => i.id === id ? updated : i));
-            addToast('Status atualizado.', 'success');
+            await api.invoices.updateStatus(invoice.id, 'PAGA', date);
+            addToast('Pagamento registrado com sucesso!', 'success');
+            setPaymentModal({ show: false, invoice: null, date: '' });
+            loadInvoices();
             loadSummary();
         } catch (err) {
             addToast(err.message, 'error');
-        }
-    };
-
-    const handleSendEmail = async () => {
-        if (!emailData.to) return addToast('Informe o e-mail de destino.', 'error');
-        if (selectedIds.length === 0) return addToast('Selecione pelo menos uma fatura na tabela abaixo.', 'warning');
-
-        setSendingEmail(true);
-        try {
-            await api.invoices.sendEmail({
-                invoiceIds: selectedIds,
-                to: emailData.to,
-                subject: emailData.subject
-            });
-            addToast('Relatório e anexos enviados!', 'success');
-            setSelectedIds([]);
-        } catch (err) {
-            addToast(err.message, 'error');
         } finally {
-            setSendingEmail(false);
+            setLoading(false);
         }
     };
 
-    const toggleSelect = (id) => {
-        if (selectedIds.includes(id)) {
-            setSelectedIds(selectedIds.filter(sid => sid !== id));
-        } else {
-            setSelectedIds([...selectedIds, id]);
-        }
-    };
-
-    const toggleSelectAll = () => {
-        if (selectedIds.length === invoices.length && invoices.length > 0) {
-            setSelectedIds([]);
-        } else {
-            setSelectedIds(invoices.map(i => i.id));
-        }
-    };
-
-    const getStatusClass = (inv) => {
-        if (inv.status === 'PAGA') return 'paga';
-        const due = new Date(inv.dueDate);
-        return due < new Date() ? 'atrasada' : 'pendente';
-    };
-
-    const displayService = (inv) => {
-        if (inv.service) {
-            return (
-                <div className="table-cell-group">
-                    <div className="table-cell-main">{inv.service.name}</div>
-                    <div className="table-cell-sub">Contrato: {inv.service.contractNumber}</div>
-                </div>
-            );
-        }
-
-        // Parse do hack de persistência caso o serviço não esteja vinculado
-        let name = inv.serviceName || '-';
-        let contract = inv.contractNumber || '';
-
-        if (name.startsWith('[CONTRATO:')) {
-            const match = name.match(/\[CONTRATO:\s*(.*?)\]\s*(.*)/);
-            if (match) {
-                contract = match[1];
-                name = match[2];
-            }
-        }
-
-        return (
-            <div className="table-cell-group">
-                <div className="table-cell-main">{name}</div>
-                {contract && <div className="table-cell-sub">Contrato: {contract}</div>}
-            </div>
+    const toggleSelect = useCallback((id) => {
+        setSelectedIds(prev =>
+            prev.includes(id) ? prev.filter(sid => sid !== id) : [...prev, id]
         );
-    };
+    }, []);
+
+    const toggleSelectAll = useCallback(() => {
+        setSelectedIds(prev =>
+            prev.length === invoices.length && invoices.length > 0
+                ? []
+                : invoices.map(i => i.id)
+        );
+    }, [invoices]);
 
     const allSelected = invoices.length > 0 && selectedIds.length === invoices.length;
 
@@ -215,7 +260,7 @@ export function InvoicesPage({ addToast }) {
                     <div className="card-header">
                         <h3 className="card-title">Importar Fatura (IA)</h3>
                     </div>
-                    <div className="card-body" style={{ minWidth: 0, minHeight: '20px' }}>
+                    <div className="card-body">
                         <div className="upload-form">
                             <label className="file-input-wrapper">
                                 <span className="file-input-label">Selecionar arquivo PDF</span>
@@ -223,23 +268,78 @@ export function InvoicesPage({ addToast }) {
                                     type="file"
                                     className="file-input"
                                     accept=".pdf"
+                                    multiple
                                     onChange={handleFileUpload}
                                     disabled={uploading}
                                 />
                             </label>
-                            <button className="btn btn-primary" disabled={uploading}>
+                            <button className="btn btn-primary" disabled={uploading} type="button">
                                 {uploading ? 'Processando...' : 'Analisar PDF'}
                             </button>
                         </div>
+
+                        {uploadQueue.length > 0 && (
+                            <div className="upload-queue">
+                                <div className="queue-header">
+                                    <span className="queue-title">Fila de Processamento ({uploadQueue.filter(i => i.status === 'done').length}/{uploadQueue.length})</span>
+                                    <div className="queue-actions">
+                                        <button className="btn-queue-clear" onClick={clearFinishedQueue}>Limpar Concluídos</button>
+                                        <button className="btn-queue-clear-all" onClick={clearQueue}>Limpar Tudo</button>
+                                    </div>
+                                </div>
+                                <div className="queue-list">
+                                    {uploadQueue.map(item => (
+                                        <div key={item.id} className={`queue-item queue-item--${item.status}`}>
+                                            <div className="queue-item-main">
+                                                <span className="queue-item-name">{item.file.name}</span>
+                                                {item.status === 'done' && item.result && (
+                                                    <div className="queue-item-meta">
+                                                        <span className="queue-meta-tag">{item.result.referenceMonth}</span>
+                                                        <span className="queue-meta-tag">R$ {formatCurrency(item.result.totalAmount)}</span>
+                                                        {item.result.unit && (
+                                                            <span className="queue-meta-tag" style={{ border: '1px solid rgba(14, 165, 233, 0.2)' }}>
+                                                                {item.result.unit.name}
+                                                            </span>
+                                                        )}
+                                                    </div>
+                                                )}
+                                                {item.status === 'error' && (
+                                                    <span className="queue-item-error-msg" style={{ fontSize: '0.7rem', color: 'rgba(239, 68, 68, 0.8)', marginTop: '2px' }}>
+                                                        {item.error}
+                                                    </span>
+                                                )}
+                                            </div>
+                                            <div className="queue-item-aside">
+                                                <span className="queue-item-status">
+                                                    {item.status === 'pending' && 'Fila'}
+                                                    {item.status === 'processing' && 'Analisando...'}
+                                                    {item.status === 'done' && '✓ Pronto'}
+                                                    {item.status === 'error' && '✕ Falha'}
+                                                </span>
+                                                {item.status !== 'processing' && (
+                                                    <button 
+                                                        className="btn-queue-remove" 
+                                                        onClick={() => removeFromQueue(item.id)}
+                                                        title="Remover da fila"
+                                                    >
+                                                        ✕
+                                                    </button>
+                                                )}
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
                     </div>
                 </div>
 
-                {/* Visão Geral Card (Restaurado) */}
+                {/* Visão Geral */}
                 <div className="card card--compact">
                     <div className="card-header">
                         <h3 className="card-title">Visão Geral</h3>
                     </div>
-                    <div className="card-body" style={{ minWidth: 0, minHeight: '20px' }}>
+                    <div className="card-body">
                         {summary ? (
                             <div className="summary-grid">
                                 <div className="summary-row">
@@ -248,11 +348,11 @@ export function InvoicesPage({ addToast }) {
                                 </div>
                                 <div className="summary-row">
                                     <span className="summary-label">Total Pendente</span>
-                                    <span className="summary-value">R$ {((summary.totalOpenAmount || 0) + (summary.totalDelayedAmount || 0)).toFixed(2)}</span>
+                                    <span className="summary-value">R$ {formatCurrency((summary.totalOpenAmount || 0) + (summary.totalDelayedAmount || 0))}</span>
                                 </div>
                                 <div className="summary-row">
                                     <span className="summary-label">Total Pago</span>
-                                    <span className="summary-value">R$ {(summary.totalPaidAmount || 0).toFixed(2)}</span>
+                                    <span className="summary-value">R$ {formatCurrency(summary.totalPaidAmount || 0)}</span>
                                 </div>
                                 <p className="summary-subtitle" style={{ marginTop: '12px', fontSize: '0.65rem' }}>Detalhamento por Status</p>
                                 <div className="status-list">
@@ -271,7 +371,7 @@ export function InvoicesPage({ addToast }) {
                 </div>
             </div>
 
-            {/* Filters Section - Estilização Melhorada */}
+            {/* Filtros */}
             <div className="dashboard-controls" style={{ marginBottom: '20px' }}>
                 <div className="filters-grid">
                     <div className="field">
@@ -281,7 +381,7 @@ export function InvoicesPage({ addToast }) {
                             className="field-input"
                             placeholder="Buscar por CNPJ..."
                             value={filters.cnpj}
-                            onAccept={(val) => setFilters({ ...filters, cnpj: val })}
+                            onAccept={(val) => setFilters(f => ({ ...f, cnpj: val }))}
                         />
                     </div>
                     <div className="field">
@@ -292,7 +392,7 @@ export function InvoicesPage({ addToast }) {
                             placeholder="MM/AAAA"
                             value={filters.month}
                             unmask={false}
-                            onAccept={(val) => setFilters({ ...filters, month: val })}
+                            onAccept={(val) => setFilters(f => ({ ...f, month: val }))}
                         />
                     </div>
                     <div className="field">
@@ -300,7 +400,7 @@ export function InvoicesPage({ addToast }) {
                         <CustomSelect
                             options={[{ label: 'Todas Unidades', value: '' }, ...units.map(u => ({ label: u.name, value: u.id }))]}
                             value={filters.unitId}
-                            onChange={(val) => setFilters({ ...filters, unitId: val })}
+                            onChange={(val) => setFilters(f => ({ ...f, unitId: val }))}
                         />
                     </div>
                     <div className="field">
@@ -309,7 +409,7 @@ export function InvoicesPage({ addToast }) {
                             className="field-input"
                             placeholder="Ex: Vivo Fibra..."
                             value={filters.service}
-                            onChange={(e) => setFilters({ ...filters, service: e.target.value })}
+                            onChange={(e) => setFilters(f => ({ ...f, service: e.target.value }))}
                         />
                     </div>
                     <div className="field">
@@ -319,28 +419,23 @@ export function InvoicesPage({ addToast }) {
                                 { label: 'Todos os Status', value: '' },
                                 { label: 'Pagas', value: 'PAGA' },
                                 { label: 'Em Aberto (No Prazo)', value: 'ABERTA' },
-                                { label: 'Atrasadas (Vencidas)', value: 'ATRASADA' }
+                                { label: 'Atrasadas (Vencidas)', value: 'ATRASADA' },
                             ]}
                             value={filters.status}
-                            onChange={(val) => setFilters({ ...filters, status: val })}
+                            onChange={(val) => setFilters(f => ({ ...f, status: val }))}
                         />
                     </div>
                 </div>
             </div>
 
-            {/* Invoices Table */}
+            {/* Tabela */}
             <div className="table-shell">
                 <div className="table-scroll">
                     <table className="table">
                         <thead>
                             <tr>
                                 <th style={{ width: '40px' }}>
-                                    <input
-                                        type="checkbox"
-                                        checked={allSelected}
-                                        onChange={toggleSelectAll}
-                                        title="Selecionar todas"
-                                    />
+                                    <input type="checkbox" checked={allSelected} onChange={toggleSelectAll} title="Selecionar todas" />
                                 </th>
                                 <th>CNPJ</th>
                                 <th>Empresa / Unidade</th>
@@ -349,15 +444,15 @@ export function InvoicesPage({ addToast }) {
                                 <th>Mês Ref.</th>
                                 <th>Valor</th>
                                 <th>Status</th>
-                                <th style={{ textAlign: 'right' }}>Ações</th>
+                                <th>Ações</th>
                             </tr>
                         </thead>
                         <tbody>
-                            {invoices.map((inv, idx) => (
+                            {invoices.map((inv) => (
                                 <tr
-                                    key={`${inv.id || 'new'}-${idx}-${inv.createdAt}`}
+                                    key={inv.id}
                                     onClick={(e) => {
-                                        if (e.target.tagName.toLowerCase() === 'button' || e.target.tagName.toLowerCase() === 'a' || e.target.closest('button')) return;
+                                        if (e.target.closest('button, a')) return;
                                         toggleSelect(inv.id);
                                     }}
                                     style={{ cursor: 'pointer' }}
@@ -373,22 +468,38 @@ export function InvoicesPage({ addToast }) {
                                     <td className="table-cell-mono">{inv.cnpj || inv.company?.cnpj || '-'}</td>
                                     <td>
                                         <div className="table-cell-group">
-                                            <div className="table-cell-main">{inv.company?.name}</div>
+                                            <div className="table-cell-main">{formatCompanyName(inv.company?.name)}</div>
                                             <div className="table-cell-sub">Unid: {inv.unit?.name || 'Não id.'}</div>
                                         </div>
                                     </td>
                                     <td>{displayService(inv)}</td>
-                                    <td className="table-cell-mono">{new Date(inv.dueDate).toLocaleDateString()}</td>
+                                    <td className="table-cell-mono">{new Date(inv.dueDate).toLocaleDateString('pt-BR')}</td>
                                     <td>{inv.referenceMonth}</td>
-                                    <td className="table-cell-mono" style={{ fontWeight: 600 }}>R$ {Number(inv.totalAmount).toFixed(2)}</td>
+                                    <td className="table-cell-mono" style={{ fontWeight: 600 }}>R$ {formatCurrency(inv.totalAmount)}</td>
                                     <td>
                                         <span className={`status-pill status-pill--${getStatusClass(inv)}`}>
-                                            {inv.status === 'ABERTA' && new Date(inv.dueDate) < new Date() ? 'ATRASADA' : (inv.status === 'ABERTA' ? 'EM ABERTO' : inv.status)}
+                                            {getStatusLabel(inv)}
                                         </span>
+                                        {inv.status === 'PAGA' && inv.paidDate && (
+                                            <div style={{ fontSize: '0.65rem', color: 'var(--text-soft)', marginTop: '2px' }}>
+                                                Pago em: {new Date(inv.paidDate).toLocaleDateString('pt-BR')}
+                                            </div>
+                                        )}
                                     </td>
                                     <td className="table-actions">
-                                        <a href={`${import.meta.env.VITE_API_URL.replace('/api', '')}/${inv.pdfPath}`} target="_blank" className="link-minimal">PDF</a>
-                                        <button className="btn-table-delete" onClick={() => handleDelete(inv.id)}>🗑</button>
+                                        <div>
+                                            {inv.status !== 'PAGA' && (
+                                                <button
+                                                    className="btn-table btn-table-pay"
+                                                    onClick={() => handleOpenPaymentModal(inv)}
+                                                    type="button"
+                                                >
+                                                    Pagar
+                                                </button>
+                                            )}
+                                            <a href={`${BASE_URL}/${inv.pdfPath}`} target="_blank" rel="noreferrer" className="link-pdf">PDF</a>
+                                            <button className="btn-table btn-table-delete" onClick={() => handleDelete(inv.id)} type="button">Excluir</button>
+                                        </div>
                                     </td>
                                 </tr>
                             ))}
@@ -402,59 +513,61 @@ export function InvoicesPage({ addToast }) {
                 </div>
             </div>
 
+            {/* Barra de seleção */}
             {selectedIds.length > 0 && (
-                <div className="selection-hint" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 16px', background: 'rgba(15, 23, 42, 0.65)', borderRadius: '12px', marginTop: '12px', border: '1px solid rgba(14, 165, 233, 0.3)' }}>
-                    <div style={{ color: 'var(--accent)', fontWeight: 600 }}>
+                <div className="selection-hint">
+                    <div className="selection-hint-count">
                         {selectedIds.length} fatura{selectedIds.length > 1 ? 's' : ''} selecionada{selectedIds.length > 1 ? 's' : ''}
                     </div>
-                    <button
-                        className="btn"
-                        style={{ backgroundColor: 'var(--danger)', color: '#fff', boxShadow: '0 4px 14px rgba(248, 113, 113, 0.3)' }}
-                        onClick={handleDeleteSelected}
-                    >
-                        🗑 Excluir Selecionadas
-                    </button>
+                    <div style={{ display: 'flex', gap: '10px' }}>
+                        <button className="btn btn-download-selected" onClick={handleDownloadSelected} type="button">
+                            📦 Baixar Selecionadas (ZIP)
+                        </button>
+                        <button className="btn btn-danger" onClick={handleDeleteSelected} type="button">
+                            🗑 Excluir Selecionadas
+                        </button>
+                    </div>
                 </div>
             )}
 
-            {/* Email Card (Fixado na parte inferior conforme pedido) */}
-            <div className="card email-card">
-                <div className="card-header">
-                    <h3 className="card-title">Enviar E-mail com Selecionadas</h3>
-                </div>
-                <div className="card-body">
-                    <div className="email-layout">
-                        <div className="field">
-                            <label className="field-label">Para (Destinatário)</label>
-                            <input
-                                type="email"
-                                className="field-input"
-                                placeholder="exemplo@email.com"
-                                value={emailData.to}
-                                onChange={(e) => setEmailData({ ...emailData, to: e.target.value })}
-                            />
+
+            {/* Modal de Pagamento */}
+            <ConfirmModal
+                show={paymentModal.show}
+                title="Registrar Pagamento"
+                confirmText="Confirmar Pagamento"
+                onConfirm={handleConfirmPayment}
+                onCancel={() => setPaymentModal({ show: false, invoice: null, date: '' })}
+                type="info"
+                loading={loading}
+            >
+                <div className="payment-modal-content">
+                    <div className="payment-info">
+                        <div className="payment-info-row">
+                            <span className="payment-info-label">Unidade:</span>
+                            <span className="payment-info-value">{paymentModal.invoice?.unit?.name}</span>
                         </div>
-                        <div className="field">
-                            <label className="field-label">Assunto</label>
-                            <input
-                                type="text"
-                                className="field-input"
-                                placeholder="Assunto do e-mail"
-                                value={emailData.subject}
-                                onChange={(e) => setEmailData({ ...emailData, subject: e.target.value })}
-                            />
+                        <div className="payment-info-row">
+                            <span className="payment-info-label">Referência:</span>
+                            <span className="payment-info-value">{paymentModal.invoice?.referenceMonth}</span>
                         </div>
-                        <button
-                            className="btn btn-accent"
-                            onClick={handleSendEmail}
-                            disabled={sendingEmail || selectedIds.length === 0}
-                        >
-                            {sendingEmail ? 'Enviando...' : 'Enviar Selecionadas'}
-                        </button>
+                        <div className="payment-info-row">
+                            <span className="payment-info-label">Valor:</span>
+                            <span className="payment-info-value">R$ {formatCurrency(paymentModal.invoice?.totalAmount)}</span>
+                        </div>
                     </div>
-                    <p className="email-helper">Anexa automaticamente os PDFs e o resumo das faturas marcadas na tabela.</p>
+
+                    <div className="payment-date-field">
+                        <label>Data do Pagamento</label>
+                        <input
+                            type="date"
+                            className="field-input"
+                            value={paymentModal.date}
+                            onChange={(e) => setPaymentModal(prev => ({ ...prev, date: e.target.value }))}
+                        />
+                    </div>
                 </div>
-            </div>
+            </ConfirmModal>
         </div>
     );
 }

@@ -1,125 +1,123 @@
 const fs = require('fs');
 const path = require('path');
-const nodemailer = require('nodemailer');
+const JSZip = require('jszip');
 const prisma = require('../lib/prisma');
 const { extractInvoiceDataWithContext, localDoubleCheckMatch } = require('../lib/invoiceExtractor');
-
 const { normalizeCnpj, parseCnpjs } = require('../lib/cnpjUtils');
 
-// ─── Controller Actions ──────────────────────────────────────────────────────
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/** Sanitiza uma string para uso seguro em nomes de arquivo. */
+const sanitizeFilename = (str) =>
+  str ? str.toString().replace(/[^a-z0-9]/gi, '_').substring(0, 50) : '_';
+
+/** Formata os detalhes de um serviço de fatura para o corpo do e-mail. */
+const formatServiceDetail = (inv) => {
+  const name = inv.service?.name || inv.serviceName || 'Não identificado';
+  const contract = inv.service?.contractNumber ? ` (${inv.service.contractNumber})` : '';
+  return `${name}${contract}`;
+};
+
+// ─── Controller Actions ───────────────────────────────────────────────────────
 
 exports.uploadInvoice = async (req, res) => {
-  console.log('[IA-Match] Início do processo de upload de fatura...');
+  if (!req.file) {
+    return res.status(400).json({ error: 'Arquivo PDF é obrigatório.' });
+  }
+
+  const pdfPath = req.file.path;
+
   try {
-    if (!req.file) {
-      return res.status(400).json({ error: 'Arquivo PDF é obrigatório.' });
-    }
+    // 1. Busca todas as unidades e serviços para contexto da IA
+    const units = await prisma.unit.findMany({ include: { services: true } });
 
-    const pdfPath = req.file.path;
+    // 2. Extração via IA com contexto das unidades
+    const { data, rawAiOutput } = await extractInvoiceDataWithContext(pdfPath, units);
 
-    // Busca todas as unidades e serviços para usar como Contexto da IA
-    const unitsContextData = await prisma.unit.findMany({
-      include: { services: true }
-    });
-
-    // Passamos o contexto diretamente para a IA
-    const { data, text, rawAiOutput } = await extractInvoiceDataWithContext(pdfPath, unitsContextData);
-
-    console.log('[IA-Match] Dados extraídos do PDF combinados:', JSON.stringify(data, null, 2));
-
-    // Filtra as unidades: aqui passamos TODAS as unidades para a IA,
-    // garantindo que não deixamos de vincular uma nota só porque a Matriz
-    // veio com CNPJ ligeiramente diferente da base de dados (Ex: Faturamento cruzado).
-    const companyUnits = unitsContextData; // Passa todas as unidades
-
-    // 2. Faz o double-check de segurança do Match passando os dados da IA e as unidades da empresa
-    let unitId = null;
-    let serviceId = null;
-    let unitName = 'Sem_Unidade';
-    let svcName = data.service || 'Sem_Servico';
-    let phone = data.phoneNumber || 'Sem_Telefone';
-    let matchDebug = null;
-    let finalCompanyId = null;
-
-    console.log(`[IA-Debug] Sinais encontrados: unitId=${data.unitId}, contractNumber=${data.contractNumber}`);
-
-    // Tenta fazer o match local
-    const match = localDoubleCheckMatch(data, companyUnits);
-
-    if (match.unit) {
-      unitId = match.unit.id;
-      unitName = match.unit.name;
-      finalCompanyId = match.unit.companyId; // Se achou a unidade, a fatura pertence à empresa DAQUELA unidade!
-
-      if (match.service) {
-        serviceId = match.service.id;
-        svcName = match.service.name;
-      }
-      console.log(`[IA] Vinculado com SUCESSO (${match.debug?.source}): Unidade "${match.unit.name}"${match.service ? ` / Serviço "${match.service.name}"` : ''}`);
-      matchDebug = match.debug;
-    } else {
-      matchDebug = match.debug;
-      console.log('[IA] Nenhum match de Unidade encontrado.');
-
-      // Se NÃO achou unidade, não tem como a fatura ficar pendente de unidade sem aprovação.
-      // E como a regra de negócio atual diz que ela nunca deve ser criada se for "Unidade Não Identificada",
-      // bloqueamos agora o processo inteiramente. 
-      if (fs.existsSync(pdfPath)) {
-        fs.unlinkSync(pdfPath);
-      }
+    // 2.5 Validação de dados mínimos obrigatórios
+    if (!data.referenceMonth || !data.totalAmount || !data.dueDate) {
+      if (fs.existsSync(pdfPath)) fs.unlinkSync(pdfPath);
       return res.status(400).json({
-        error: 'Esta fatura não corresponde a nenhuma unidade (ou serviço/contrato) atualmente cadastrada no banco de dados. Cadastre sua Unidade no painel antes de subir faturas para ela.',
-        debug: matchDebug
+        error: 'Não foi possível extrair dados essenciais (Mês, Valor ou Vencimento) desta fatura. Verifique se o PDF é uma fatura válida.',
+        missingFields: {
+          referenceMonth: !data.referenceMonth,
+          totalAmount: !data.totalAmount,
+          dueDate: !data.dueDate
+        }
       });
     }
 
-    // 2.1. Renomeia o PDF para um nome amigável
-    // Sanitize function for filenames
-    const sanitize = (str) => str ? str.toString().replace(/[^a-z0-9]/gi, '_').substring(0, 50) : '_';
+    // 3. Double-check local do match (valida/corrige o que a IA retornou)
+    const match = localDoubleCheckMatch(data, units);
 
-    const newFileName = `${sanitize(unitName)}-${sanitize(svcName)}-${sanitize(phone)}-${Date.now()}.pdf`;
-    const newPath = path.join(path.dirname(pdfPath), newFileName);
-
-    try {
-      fs.renameSync(pdfPath, newPath);
-      // Atualiza o pdfPath para o novo caminho para salvar no banco
-      var finalPdfPath = newPath;
-    } catch (renameErr) {
-      console.error('[invoices] Erro ao renomear arquivo:', renameErr);
-      var finalPdfPath = pdfPath; // Mantém o original se der erro
+    if (!match.unit) {
+      if (fs.existsSync(pdfPath)) fs.unlinkSync(pdfPath);
+      return res.status(400).json({
+        error: 'Esta fatura não corresponde a nenhuma unidade cadastrada. Cadastre sua Unidade no painel antes de fazer upload de faturas.',
+        debug: match.debug,
+      });
     }
 
-    // 3. Cria a fatura
+    const { id: unitId, name: unitName, companyId } = match.unit;
+    const serviceId = match.service?.id ?? null;
+    const svcName = match.service?.name ?? data.service ?? 'Sem_Servico';
+    const phone = data.phoneNumber ?? 'Sem_Telefone';
+
+    console.log(`[IA] Match: Unidade "${unitName}"${match.service ? ` / Serviço "${match.service.name}"` : ''} (${match.debug?.source})`);
+
+    // 4. Determinação do CNPJ final (Regra de Unidade Majoritária)
+    // Prioridade 1: CNPJ literal extraído pela IA da fatura
+    let finalCnpj = data.cnpj;
+
+    // Prioridade 2: Se não houver CNPJ literal, usamos o CNPJ da Unidade que a lógica local encontrou (Match por Contrato/Endereço)
+    if (!finalCnpj || finalCnpj.trim() === '') {
+      const { SOBEI_MATRIZ_CNPJ } = require('../config/constants');
+      const unitCnpjs = parseCnpjs(match.unit?.cnpjs);
+      
+      if (unitCnpjs.length > 0) {
+        finalCnpj = unitCnpjs[0]; 
+        console.log(`[invoices] CNPJ não encontrado na fatura. Usando CNPJ da Unidade encontrada: ${finalCnpj}`);
+      } else {
+        // Fallback final: Matriz (Garante que o campo obrigatório no DB seja preenchido)
+        finalCnpj = SOBEI_MATRIZ_CNPJ;
+        console.log(`[invoices] CNPJ não encontrado e Unidade sem CNPJ. Usando Fallback Matriz: ${finalCnpj}`);
+      }
+    }
+
+    // 5. Renomeia o PDF para nome amigável
+    const newFileName = `${sanitizeFilename(unitName)}-${sanitizeFilename(svcName)}-${sanitizeFilename(phone)}-${Date.now()}.pdf`;
+    const newPath = path.join(path.dirname(pdfPath), newFileName);
+
+    let finalPdfPath = pdfPath;
+    try {
+      fs.renameSync(pdfPath, newPath);
+      finalPdfPath = newPath;
+    } catch (renameErr) {
+      console.error('[invoices] Erro ao renomear arquivo:', renameErr);
+    }
+
+    // 5. Persiste a fatura
     const invoice = await prisma.invoice.create({
       data: {
-        companyId: finalCompanyId,
+        companyId,
         unitId,
         serviceId,
-        cnpj: data.cnpj,
+        cnpj: finalCnpj,
         referenceMonth: data.referenceMonth,
         totalAmount: data.totalAmount,
         dueDate: new Date(data.dueDate + 'T12:00:00'),
         status: data.status,
-        // Hack: Como o DB não permite novas colunas no momento, guardamos o contrato no serviceName formatado
-        serviceName: data.contractNumber ? `[CONTRATO: ${data.contractNumber}] ${data.service || 'VIVO'}` : (data.service || 'VIVO'),
+        serviceName: data.contractNumber
+          ? `[CONTRATO: ${data.contractNumber}] ${data.service ?? 'VIVO'}`
+          : (data.service ?? 'VIVO'),
         pdfPath: path.relative(path.join(__dirname, '..', '..'), finalPdfPath).replace(/\\/g, '/'),
       },
-      include: {
-        company: true,
-        unit: true,
-        service: true,
-      },
+      include: { company: true, unit: true, service: true },
     });
 
-    return res.status(201).json({
-      ...invoice,
-      contractNumber: data.contractNumber,
-      debug: matchDebug
-    });
+    return res.status(201).json({ ...invoice, contractNumber: data.contractNumber, debug: match.debug });
   } catch (err) {
-    if (req.file && fs.existsSync(req.file.path)) {
-      fs.unlinkSync(req.file.path);
-    }
+    if (fs.existsSync(pdfPath)) fs.unlinkSync(pdfPath);
     console.error('[invoices] uploadInvoice:', err);
     return res.status(500).json({ error: 'Erro ao processar fatura.', details: err.message });
   }
@@ -130,10 +128,10 @@ exports.listInvoices = async (req, res) => {
     const { cnpj, status, month, unitId, service } = req.query;
     const where = {};
 
-    if (cnpj && cnpj.trim() !== '') where.cnpj = cnpj;
-    if (month && month.trim() !== '') where.referenceMonth = month;
+    if (cnpj?.trim()) where.cnpj = cnpj;
+    if (month?.trim()) where.referenceMonth = month;
     if (unitId && unitId !== 'undefined' && unitId !== '') where.unitId = Number(unitId);
-    if (service && service.trim() !== '') where.serviceName = { contains: service, mode: 'insensitive' };
+    if (service?.trim()) where.serviceName = { contains: service, mode: 'insensitive' };
 
     if (status) {
       const today = new Date();
@@ -168,27 +166,74 @@ exports.getDashboard = async (req, res) => {
     const { month, unitId } = req.query;
     const where = {};
 
-    if (month && month.trim() !== '') where.referenceMonth = month;
+    if (month?.trim()) where.referenceMonth = month;
     if (unitId && unitId !== 'undefined' && unitId !== '') where.unitId = Number(unitId);
 
     const invoices = await prisma.invoice.findMany({
       where,
-      select: { status: true, dueDate: true, totalAmount: true },
+      include: { unit: true, service: true },
+      orderBy: { dueDate: 'desc' },
     });
 
-    const statusCounts = { PAGA: 0, ABERTA: 0, ATRASADA: 0 };
-    const dueDaysMap = {};
     const today = new Date();
     today.setHours(0, 0, 0, 0);
 
+    const mismatchedCnpjs = [];
+    const unregisteredServices = [];
+    const solucionaInvoices = [];
+    const seenServiceIds = new Set();
+
+    const statusCounts = { PAGA: 0, ABERTA: 0, ATRASADA: 0 };
+    const dueDaysMap = {};
     let totalAmount = 0;
     let totalOpenAmount = 0;
     let totalDelayedAmount = 0;
     let totalPaidAmount = 0;
 
-    invoices.forEach(inv => {
+    for (const inv of invoices) {
       const amount = Number(inv.totalAmount?.toString()) || 0;
       totalAmount += amount;
+
+      // Check for Soluciona TI (Hardware Rental)
+      const serviceText = (inv.serviceName || inv.service?.name || '').toUpperCase();
+      if (serviceText.includes('SOLUCIONA TI')) {
+        solucionaInvoices.push({
+          id: inv.id,
+          unitName: inv.unit?.name || 'Não id.',
+          serviceName: inv.serviceName,
+          referenceMonth: inv.referenceMonth,
+          amount: amount
+        });
+      }
+
+      // Check CNPJ mismatch
+      if (inv.unit && inv.cnpj) {
+        const { parseCnpjs, normalizeCnpj } = require('../lib/cnpjUtils');
+        const unitCnpjs = parseCnpjs(inv.unit.cnpjs).map(normalizeCnpj);
+        const invCnpj = normalizeCnpj(inv.cnpj);
+        if (unitCnpjs.length > 0 && !unitCnpjs.includes(invCnpj)) {
+          mismatchedCnpjs.push({
+            id: inv.id,
+            cnpj: inv.cnpj,
+            unitName: inv.unit.name,
+            expected: unitCnpjs.join(', '),
+            referenceMonth: inv.referenceMonth
+          });
+        }
+      }
+
+      // Track registered services
+      if (inv.serviceId) {
+        seenServiceIds.add(inv.serviceId);
+      } else {
+        // Unregistered service tracking
+        unregisteredServices.push({
+          id: inv.id,
+          name: inv.serviceName || 'Vivo',
+          unitName: inv.unit?.name || 'Não id.',
+          referenceMonth: inv.referenceMonth
+        });
+      }
 
       if (inv.status === 'PAGA') {
         statusCounts.PAGA++;
@@ -207,7 +252,28 @@ exports.getDashboard = async (req, res) => {
 
       const day = new Date(inv.dueDate).getUTCDate();
       dueDaysMap[day] = (dueDaysMap[day] || 0) + 1;
-    });
+    }
+
+    // Identify missing services (Active contracts without invoices in this period)
+    const allUnits = await prisma.unit.findMany({ include: { services: true } });
+    const missingServices = [];
+    if (month) {
+      for (const u of allUnits) {
+        // If filtering by unit, only check that unit
+        if (unitId && u.id !== Number(unitId)) continue;
+
+        for (const s of u.services) {
+          if (!seenServiceIds.has(s.id)) {
+            missingServices.push({
+              id: s.id,
+              name: s.name,
+              contract: s.contractNumber,
+              unitName: u.name
+            });
+          }
+        }
+      }
+    }
 
     return res.json({
       totalInvoices: invoices.length,
@@ -223,6 +289,12 @@ exports.getDashboard = async (req, res) => {
       dueDays: Object.entries(dueDaysMap)
         .map(([day, count]) => ({ day: Number(day), count }))
         .sort((a, b) => a.day - b.day),
+      analysis: {
+        mismatchedCnpjs,
+        unregisteredServices,
+        missingServices,
+        solucionaInvoices
+      }
     });
   } catch (err) {
     console.error('[invoices] getDashboard:', err);
@@ -230,81 +302,12 @@ exports.getDashboard = async (req, res) => {
   }
 };
 
-exports.sendInvoicesEmail = async (req, res) => {
-  try {
-    const { invoiceIds, to, subject } = req.body;
-
-    if (!invoiceIds?.length || !to) {
-      return res.status(400).json({ error: 'Faturas e destinatário são obrigatórios.' });
-    }
-
-    const invoices = await prisma.invoice.findMany({
-      where: { id: { in: invoiceIds.map(Number) } },
-      include: { company: true, unit: true, service: true },
-    });
-
-    if (!invoices.length) return res.status(404).json({ error: 'Nenhuma fatura encontrada.' });
-
-    const transporter = nodemailer.createTransport({
-      host: process.env.SMTP_HOST,
-      port: Number(process.env.SMTP_PORT || 587),
-      secure: false,
-      auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
-    });
-
-    const attachments = invoices
-      .map(inv => {
-        // Resolve o caminho a partir da raiz do projeto (backend/)
-        const fullPath = path.resolve(process.cwd(), inv.pdfPath);
-        if (fs.existsSync(fullPath)) {
-          return { filename: path.basename(fullPath), path: fullPath };
-        }
-        console.warn(`[email] PDF não encontrado no caminho: ${fullPath}`);
-        return null;
-      })
-      .filter(Boolean);
-
-    const formatSvc = (inv) => {
-      const name = inv.service?.name || inv.serviceName || 'Não identificado';
-      const contract = inv.service?.contractNumber ? ` (${inv.service.contractNumber})` : '';
-      return `${name}${contract}`;
-    };
-
-    const body = `Relatório de faturas enviadas via CRM SOBEI:\n\n` +
-      invoices.map(i => {
-        const line = `- ${i.company.name} | Unidade: ${i.unit?.name || '-'} | Serviço: ${formatSvc(i)} | Vencimento: ${new Date(i.dueDate).toLocaleDateString()} | Valor: R$ ${Number(i.totalAmount).toFixed(2)}`;
-        return line;
-      }).join('\n') + `\n\nTotal de faturas: ${invoices.length}`;
-
-    // Log para diagnóstico (apenas no console do servidor)
-    const host = process.env.SMTP_HOST;
-    console.log(`[email] Iniciando envio para ${to} via ${host}...`);
-
-    try {
-      await transporter.sendMail({
-        from: process.env.SMTP_FROM || process.env.SMTP_USER,
-        to,
-        subject: subject || 'Faturas Vivo Empresas',
-        text: body,
-        attachments,
-      });
-      console.log(`[email] SUCESSO: E-mail enviado para ${to}`);
-    } catch (mailError) {
-      console.error(`[email] ERRO SMTP (${host}):`, mailError.message);
-      throw mailError; // Repassa para o catch principal
-    }
-
-    return res.json({ success: true });
-  } catch (err) {
-    console.error('[invoices] sendEmail:', err);
-    return res.status(500).json({ error: 'Erro ao enviar e-mail.', details: err.message });
-  }
-};
 
 exports.deleteInvoice = async (req, res) => {
   try {
-    const { id } = req.params;
-    const invoice = await prisma.invoice.findUnique({ where: { id: Number(id) } });
+    const id = Number(req.params.id);
+    const invoice = await prisma.invoice.findUnique({ where: { id } });
+
     if (!invoice) return res.status(404).json({ error: 'Fatura não encontrada.' });
 
     if (invoice.pdfPath) {
@@ -312,7 +315,7 @@ exports.deleteInvoice = async (req, res) => {
       if (fs.existsSync(fullPath)) fs.unlinkSync(fullPath);
     }
 
-    await prisma.invoice.delete({ where: { id: Number(id) } });
+    await prisma.invoice.delete({ where: { id } });
     return res.json({ success: true });
   } catch (err) {
     console.error('[invoices] deleteInvoice:', err);
@@ -322,16 +325,23 @@ exports.deleteInvoice = async (req, res) => {
 
 exports.updateInvoiceStatus = async (req, res) => {
   try {
-    const { id } = req.params;
-    const { status } = req.body;
+    const id = Number(req.params.id);
+    const { status, paidDate } = req.body;
 
     if (!['PAGA', 'ABERTA'].includes(status)) {
       return res.status(400).json({ error: 'Status inválido.' });
     }
 
+    const data = { status };
+    if (status === 'PAGA') {
+      data.paidDate = paidDate ? new Date(paidDate) : new Date();
+    } else {
+      data.paidDate = null;
+    }
+
     const updated = await prisma.invoice.update({
-      where: { id: Number(id) },
-      data: { status },
+      where: { id },
+      data,
       include: { company: true, unit: true, service: true },
     });
 
@@ -339,5 +349,44 @@ exports.updateInvoiceStatus = async (req, res) => {
   } catch (err) {
     console.error('[invoices] updateStatus:', err);
     return res.status(500).json({ error: 'Erro ao atualizar status.' });
+  }
+};
+
+exports.downloadInvoicesZip = async (req, res) => {
+  try {
+    const { ids } = req.query;
+    if (!ids) return res.status(400).json({ error: 'Nenhum ID de fatura fornecido.' });
+
+    const idList = ids.split(',').map(Number);
+    const invoices = await prisma.invoice.findMany({
+      where: { id: { in: idList } },
+    });
+
+    if (invoices.length === 0) {
+      return res.status(404).json({ error: 'Nenhuma fatura encontrada para baixar.' });
+    }
+
+    const zip = new JSZip();
+    const rootDir = path.join(__dirname, '..', '..');
+
+    for (const inv of invoices) {
+      if (inv.pdfPath) {
+        const fullPath = path.join(rootDir, inv.pdfPath);
+        if (fs.existsSync(fullPath)) {
+          const fileData = fs.readFileSync(fullPath);
+          const fileName = path.basename(inv.pdfPath);
+          zip.file(fileName, fileData);
+        }
+      }
+    }
+
+    const content = await zip.generateAsync({ type: 'nodebuffer' });
+    
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename=faturas-sobei-${Date.now()}.zip`);
+    return res.send(content);
+  } catch (err) {
+    console.error('[invoices] downloadZip:', err);
+    return res.status(500).json({ error: 'Erro ao gerar arquivo ZIP.' });
   }
 };

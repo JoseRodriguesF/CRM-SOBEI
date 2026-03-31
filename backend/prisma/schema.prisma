@@ -62,6 +62,7 @@ model Invoice {
   totalAmount    Decimal
   dueDate        DateTime
   status         InvoiceStatus
+  paidDate       DateTime?     // Data em que a fatura foi paga
   serviceName    String?       // Nome do serviço extraído da fatura (cache/referência)
   pdfPath        String
   createdAt      DateTime      @default(now())

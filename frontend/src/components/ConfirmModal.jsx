@@ -1,5 +1,3 @@
-import React from 'react';
-
 /**
  * Modal genérico de confirmação para ações destrutivas ou importantes.
  */
@@ -12,33 +10,29 @@ export function ConfirmModal({
     confirmText = 'Confirmar',
     cancelText = 'Cancelar',
     type = 'danger',
-    loading = false
+    loading = false,
+    children,
 }) {
     if (!show) return null;
+
+    const isDanger = type === 'danger';
 
     return (
         <div className="modal-overlay">
             <div className="modal-box modal-box--sm">
                 <div className="confirm-modal-body">
-                    <div className={`confirm-icon confirm-icon--${type === 'danger' ? 'danger' : 'info'}`}>
-                        {type === 'danger' ? '🗑' : '?'}
+                    <div className={`confirm-icon confirm-icon--${isDanger ? 'danger' : 'info'}`}>
+                        {isDanger ? '🗑' : '?'}
                     </div>
                     <h3 className="confirm-title">{title}</h3>
-                    <p className="confirm-message">{message}</p>
+                    {message && <p className="confirm-message">{message}</p>}
+                    {children && <div className="confirm-custom-content">{children}</div>}
                 </div>
                 <div className="confirm-actions">
-                    <button
-                        className="btn btn-ghost"
-                        onClick={onCancel}
-                        disabled={loading}
-                    >
+                    <button className="btn btn-ghost" onClick={onCancel} disabled={loading}>
                         {cancelText}
                     </button>
-                    <button
-                        className={`btn ${type === 'danger' ? 'btn-danger' : 'btn-primary'}`}
-                        onClick={onConfirm}
-                        disabled={loading}
-                    >
+                    <button className={`btn ${isDanger ? 'btn-danger' : 'btn-primary'}`} onClick={onConfirm} disabled={loading}>
                         {loading ? 'Processando...' : confirmText}
                     </button>
                 </div>

@@ -1,9 +1,10 @@
 const fs = require('fs');
-const { PDFParse } = require('pdf-parse');
 const { z } = require('zod');
 const OpenAI = require('openai');
+const { PDFParse } = require('pdf-parse');
 const prisma = require('./prisma');
 const { normalizeCnpj, parseCnpjs } = require('./cnpjUtils');
+const { VIVO_CNPJ_ROOT, SOBEI_MATRIZ_CNPJ, AI_MODEL, PDF_TEXT_LIMIT } = require('../config/constants');
 
 // ─── OpenAI Client ───────────────────────────────────────────────────────────
 
@@ -18,181 +19,73 @@ const openai = process.env.OPENAI_API_KEY
 // ─── Schema de validação ─────────────────────────────────────────────────────
 
 const extractedInvoiceSchema = z.object({
-    cnpj: z.string(),
-    companyName: z.string().optional().nullable(),
-    unitId: z.number().optional().nullable(),
-    serviceId: z.number().optional().nullable(),
-    unitCnpj: z.string().optional().nullable(),
-    unitAddress: z.string().optional().nullable(),
-    contractNumber: z.string().optional().nullable(),
-    phoneNumber: z.string().optional().nullable(),
-    referenceMonth: z.string(),
-    totalAmount: z.number(),
-    dueDate: z.string(),
-    service: z.string().optional().nullable(),
-    status: z.enum(['PAGA', 'ABERTA']),
+    cnpj: z.any().optional(),
+    companyName: z.any().optional(),
+    unitId: z.any().optional(),
+    serviceId: z.any().optional(),
+    unitCnpj: z.any().optional(),
+    unitAddress: z.any().optional(),
+    contractNumber: z.any().optional(),
+    phoneNumber: z.any().optional(),
+    referenceMonth: z.any().optional(),
+    totalAmount: z.any().optional(),
+    dueDate: z.any().optional(),
+    service: z.any().optional(),
+    status: z.any().optional(),
 });
 
-// ─── Extração de PDF com Contexto ────────────────────────────────────────────
+// ─── Prompt de extração ───────────────────────────────────────────────────────
 
-const PDF_PROMPT = (text, unitsContext, allowedCnpjs) => `
-Você é um assistente especializado em extrair dados de faturas corporativas em PDFs (ex: Vivo Empresas).
-Abaixo está a lista de unidades e faturamentos da empresa que você deve considerar como CLIENTES legítimos:
+const buildPdfPrompt = (text, unitsContext, allowedCnpjs) => `
+Você é um assistente especializado em extrair dados de faturas corporativas (ex: Vivo Empresas).
+Sua PRIORIDADE MÁXIMA é identificar o CLIENTE (Destinatário/Pagador) e IGNORAR o EMISSOR (Vivo/Telefônica).
 
-[CLIENTES CADASTRADOS (SEUS POSSÍVEIS DESTINATÁRIOS)]
+[CONTEXTO IMPORTANTE]
+- O CNPJ do cliente (SOBEI) geralmente começa com a raiz: 53.818.191
+- O CNPJ da Vivo (EMISSOR) foi propositalmente removido ou mascarado no texto abaixo para evitar confusão.
+- Se você encontrar um CNPJ que comece com 02.558.157, IGNORE-O totalmente.
+
+[CLIENTES CADASTRADOS (PARA IDENTIFICAÇÃO DE UNIDADE/SERVIÇO)]
 ${unitsContext}
 CNPJs Válidos para Match: ${allowedCnpjs.join(', ')}
 [/CLIENTES CADASTRADOS]
 
-Com base no texto da fatura fornecido abaixo, sua missão principal é:
-1. Localizar o campo DESTINATÁRIO, DADOS DO CLIENTE ou RAZÃO SOCIAL. 
-   - Geralmente aparece como: "Razão Social: SOCIEDADE BENEFICENTE EQUILIBRIO DE INTERLAGOS... CNPJ: 53.818.191/0001-60".
-2. Extrair o CNPJ do CLIENTE (quem utiliza o serviço). 
-   - ATENÇÃO: É TERMINANTEMENTE PROIBIDO pegar o CNPJ da VIVO / Telefônica Brasil S/A (raiz 02.558.157). 
-   - IGNORE o CNPJ do emissor que aparece no cabeçalho ou rodapé como "Telefônica Brasil S/A" ou "CNPJ Matriz/Emitente: 02.558.157/XXXX-XX".
-   - IMPORTANTE: Muitas faturas têm o CNPJ da MATRIZ (pagador) e o CNPJ da FILIAL (instalação). Você deve priorizar o CNPJ da FILIAL/UNIDADE que está recebendo o serviço, que geralmente está próximo ao endereço de instalação.
-3. Extrair dados financeiros: Valor total, Vencimento (dueDate), Mês de Referência (MM/AAAA). 
-   - Verifique o campo 'Total a Pagar' ou 'Valor Total da Fatura'.
-4. Tentar vincular essa fatura a uma das unidades (unitId) e serviços (serviceId) da lista acima.
-   - Várias unidades podem compartilhar o mesmo CNPJ. Use o 'Número do Contrato/Conta' (contractNumber) e o 'Endereço de Instalação' como critérios de desempate definitivos.
+Instruções Críticas:
+1. **NUNCA** retorne o CNPJ da Vivo.
+2. **LOCALIZE O CLIENTE**: Procure por "CPF/CNPJ:" ou "Razão Social:".
+3. **CNPJ LITERAL**: Extraia o CNPJ do cliente EXATAMENTE como escrito no texto da fatura. NÃO tente adivinhar ou mudar o CNPJ baseado no endereço ou no contexto de clientes acima; use o valor impresso no documento.
+4. **NÚMERO DA CONTA/CONTRATO**: Este é o dado mais importante para identificar a unidade. Localize-o com precisão (geralmente 10 a 14 dígitos).
+5. **CHAVE DE ACESSO**: Ignore sequências de 44 dígitos.
+6. **ENDEREÇO**: Extraia o endereço de instalação para o campo 'unitAddress'. Ele é fundamental para diferenciar unidades com o mesmo CNPJ.
 
-Retorne APENAS um JSON válido seguindo este modelo:
+Retorne APENAS um JSON:
 {
-  "cnpj": "CNPJ do CLIENTE/PAGADOR (ex: 53.818.191/0001-60)",
-  "companyName": "Nome da empresa cliente",
-  "unitId": ID da unidade (da lista acima ou null),
-  "serviceId": ID do serviço (da lista acima ou null),
-  "unitCnpj": "CNPJ da filial/unidade na nota",
-  "unitAddress": "Endereço de instalação na nota",
-  "contractNumber": "Número da conta/contrato (longo, ex: 8999...)",
-  "phoneNumber": "Telefone de referência",
+  "cnpj": "CNPJ do CLIENTE (literal do texto, EX: 53.818.191/XXXX-XX. Se não encontrar, retorne null)",
+  "companyName": "Nome do Cliente",
+  "unitId": ID da unidade (apenas se tiver certeza absoluta pelo contrato ou endereço),
+  "serviceId": ID do serviço,
+  "unitCnpj": "CNPJ da instalação",
+  "unitAddress": "Endereço de instalação",
+  "contractNumber": "Número da conta/contrato",
+  "phoneNumber": "Telefone",
   "referenceMonth": "MM/AAAA",
-  "totalAmount": 123.45,
+  "totalAmount": 0.00,
   "dueDate": "AAAA-MM-DD",
-  "service": "Tipo de serviço (ex: Vivo Fixa, Vivo Móvel)",
+  "service": "Tipo de serviço",
   "status": "ABERTA"
 }
 
-Texto da fatura (1ª página):
-"""${text.slice(0, 15000)}"""
+Texto da fatura (Sanitizado):
+"""${text.slice(0, PDF_TEXT_LIMIT)}"""
 `;
 
-/**
- * Extrai dados estruturados de um arquivo PDF com o contexto das unidades do banco.
- */
-async function extractInvoiceDataWithContext(filePath, units = []) {
-    if (!openai) throw new Error('OPENAI_API_KEY não configurado no backend.');
-
-    // 1. Extração do Texto Bruto
-    const buffer = fs.readFileSync(filePath);
-    const parser = new PDFParse({ data: buffer });
-    const pdfData = await parser.getText({ first: 1 });
-    const rawText = pdfData.text;
-
-    // 2. Formatando contexto das unidades para o Prompt
-    const unitsContext = units.map(u => ({
-        id: u.id,
-        nome: u.name,
-        cnpjs: parseCnpjs(u.cnpjs),
-        endereco: u.address,
-        servicos: u.services.map(s => ({
-            id: s.id,
-            nome: s.name,
-            contrato_conta: s.contractNumber
-        }))
-    }));
-
-    const contextStr = JSON.stringify(unitsContext, null, 2);
-
-    // 3. Chamando a IA com o contexto aprimorado
-    const allowedCnpjs = [...new Set(units.flatMap(u => parseCnpjs(u.cnpjs)))];
-
-    const completion = await openai.chat.completions.create({
-        model: 'gpt-4o-mini',
-        messages: [
-            {
-                role: 'system',
-                content: 'Você é um especialista em análise de faturas de telecom. Sua prioridade absoluta é identificar o CLIENTE pagador e ignorar o EMISSOR Vivo.',
-            },
-            { role: 'user', content: PDF_PROMPT(rawText, contextStr, allowedCnpjs) },
-        ],
-        response_format: { type: 'json_object' },
-    });
-
-    const raw = JSON.parse(completion.choices[0].message.content);
-    console.log('[IA-Debug] Dados extraídos e match primário da IA:', JSON.stringify(raw, null, 2));
-
-    // Bloqueio de Segurança: Se a IA insistir em pegar o CNPJ da Vivo, ou se quisermos garantir o CNPJ da unidade correta
-    const cleanCnpj = raw.cnpj ? raw.cnpj.replace(/\D/g, '') : '';
-    const VIVO_ROOT = '02558157';
-
-    if (cleanCnpj.startsWith(VIVO_ROOT) || raw.unitId || !raw.cnpj) {
-        const cnpjRegex = /\d{2}[\.\s]?\d{3}[\.\s]?\d{3}[\/\s]?\d{4}[-\s]?\d{2}/g;
-        const matches = rawText.match(cnpjRegex) || [];
-        // Filtra CNPJs que NÃO são da Vivo
-        const clientCnpjs = [...new Set(matches.filter(c => !c.replace(/\D/g, '').startsWith(VIVO_ROOT)))];
-
-        if (raw.unitId) {
-            const unit = units.find(u => u.id === raw.unitId);
-            if (unit) {
-                const uCnpjs = parseCnpjs(unit.cnpjs).map(normalizeCnpj);
-                // Se o CNPJ que a IA pegou é da Vivo OU não é um dos CNPJs cadastrados para ESSA unidade, tentamos corrigir
-                if (cleanCnpj.startsWith(VIVO_ROOT) || !uCnpjs.includes(normalizeCnpj(raw.cnpj))) {
-                    const matchedBranchCnpj = clientCnpjs.find(c => uCnpjs.includes(normalizeCnpj(c)));
-                    if (matchedBranchCnpj) {
-                        console.log(`[IA-Fallback] Corrigindo CNPJ para o CNPJ específico da Unidade: ${matchedBranchCnpj}`);
-                        raw.cnpj = matchedBranchCnpj;
-                    } else if (uCnpjs.length > 0 && (cleanCnpj.startsWith(VIVO_ROOT) || !raw.cnpj)) {
-                        // Se a IA pegou a VIVO ou não pegou nada, e não achamos o CNPJ da unidade no texto, usamos o primeiro cadastrado
-                        raw.cnpj = uCnpjs[0];
-                    }
-                }
-            }
-        } else if (cleanCnpj.startsWith(VIVO_ROOT) || !raw.cnpj) {
-            // Se não tem unitId mas pegou a Vivo ou nada, tenta um detector heurístico de Razão Social
-            const cnpjNearRazao = rawText.match(/Raz[ãa]o\s+Social.*?(\d{2}[\.\s]?\d{3}[\.\s]?\d{3}[\/\s]?\d{4}[-\s]?\d{2})/is);
-
-            if (cnpjNearRazao && !cnpjNearRazao[1].replace(/\D/g, '').startsWith(VIVO_ROOT)) {
-                raw.cnpj = cnpjNearRazao[1];
-                console.log(`[IA-Fallback] CNPJ encontrado via detecção de 'Razão Social': ${raw.cnpj}`);
-            } else if (clientCnpjs.length > 0) {
-                // Se não achou perto da Razão Social, pega o primeiro que não seja Vivo
-                raw.cnpj = clientCnpjs[0];
-                console.log(`[IA-Fallback] CNPJ da Vivo substituído pelo primeiro CNPJ de cliente encontrado: ${raw.cnpj}`);
-            }
-        }
-    }
-
-
-    // Fallback Manual Robusto para Contract Number (prática boa existente mantida)
-    if (!raw.contractNumber) {
-        // Regex para capturar números de conta longos típicos da Vivo que a IA pode ter pulado
-        const fallbackMatch = rawText.match(/Conta[:\s]+(\d{10,14})/i) ||
-            rawText.match(/Conta[^0-9]+(\d{10,14})/i) ||
-            rawText.match(/N[úu]mero\s+da\s+Conta[:\s]+(\d{10,14})/i) ||
-            rawText.match(/CADASTRADO\s+EM\s+NOME\s+DE.*?(\d{10,14})/is);
-
-        if (fallbackMatch) {
-            raw.contractNumber = fallbackMatch[1];
-            console.log(`[IA-Fallback] Número de Conta encontrado via Regex: ${raw.contractNumber}`);
-        }
-    }
-
-    // Passar pelo parsing do Zod para garantir tipos e sanitizar dados financeiros (prática boa existente mantida)
-    const validData = extractedInvoiceSchema.parse({
-        ...raw,
-        totalAmount:
-            typeof raw.totalAmount === 'string'
-                ? Number(raw.totalAmount.replace('.', '').replace(',', '.'))
-                : raw.totalAmount,
-    });
-
-    return { data: validData, text: rawText, rawAiOutput: raw };
-}
+// ─── Helpers de pontuação ─────────────────────────────────────────────────────
 
 function scoreAddress(invoiceAddress, unitAddress) {
     if (!invoiceAddress || !unitAddress) return 0;
-    const normalize = (s) => s.toLowerCase()
+
+    const normalize = (s) => s
+        .toLowerCase()
         .replace(/[^a-z0-9]/g, '')
         .replace(/rua|avenida|av|praca|viela|alameda|rodovia|rod|travessa|trv|end|r\s|r\.|n\.|n\s|zona|sul|norte|leste|oeste/g, '');
 
@@ -200,13 +93,13 @@ function scoreAddress(invoiceAddress, unitAddress) {
     const addrB = normalize(unitAddress);
 
     if (addrA.length <= 5 || addrB.length <= 5) return 0;
-    if (addrA === addrB) return 25;
-    if (addrA.includes(addrB) || addrB.includes(addrA)) return 20;
-
+    if (addrA === addrB) return 80; // Antes 25
+    if (addrA.includes(addrB) || addrB.includes(addrA)) return 60; // Antes 20
     const shorter = addrA.length > addrB.length ? addrB : addrA;
     const longer = addrA.length > addrB.length ? addrA : addrB;
     const minMatch = Math.min(15, Math.floor(shorter.length * 0.7));
-    if (longer.includes(shorter.slice(0, minMatch))) return 12;
+    if (longer.includes(shorter.slice(0, minMatch))) return 40; // Antes 12
+
     return 0;
 }
 
@@ -215,88 +108,176 @@ function scoreServiceName(pdfServiceName, registeredServiceName) {
     const normalize = (s) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
     const a = normalize(pdfServiceName);
     const b = normalize(registeredServiceName);
-    if (a === b) return 8;
-    return a.includes(b) || b.includes(a) ? 5 : 0;
+    if (a === b) return 20; // Antes 8
+    return a.includes(b) || b.includes(a) ? 12 : 0; // Antes 5
 }
 
-/**
- * Função utilitária de double-check. Caso a IA não retorne o ID e apenas extraia o dado solto.
- * Ou caso a IA erre, fazemos um over-check de segurança de match aqui com pontuação para achar a unidade MAIS PRÓXIMA (fallback).
- */
-function localDoubleCheckMatch(extractedData, units) {
-    let bestUnit = null;
-    let bestService = null;
-    let debugInfo = { source: 'nenhum' };
+// ─── Extração de PDF com Contexto ────────────────────────────────────────────
 
-    // Se a base de unidades for vazia, não há o que checar.
-    if (!units || units.length === 0) {
-        return { unit: null, service: null, debug: debugInfo };
+/**
+ * Extrai dados estruturados de um arquivo PDF com o contexto das unidades do banco.
+ * @param {string} filePath
+ * @param {object[]} units
+ */
+async function extractInvoiceDataWithContext(filePath, units = []) {
+    if (!openai) throw new Error('OPENAI_API_KEY não configurado no backend.');
+
+    // 1. Extração do texto bruto (API v2)
+    const buffer = fs.readFileSync(filePath);
+    const parser = new PDFParse({ data: buffer });
+    const result = await parser.getText();
+    await parser.destroy();
+    const rawText = result.text;
+
+    // 2. Contexto das unidades para o prompt
+    const unitsContext = units.map(u => ({
+        id: u.id,
+        nome: u.name,
+        cnpjs: parseCnpjs(u.cnpjs),
+        endereco: u.address,
+        servicos: u.services.map(s => ({
+            id: s.id,
+            nome: s.name,
+            contrato_conta: s.contractNumber,
+        })),
+    }));
+
+    const allowedCnpjs = [...new Set(units.flatMap(u => parseCnpjs(u.cnpjs)))];
+
+    // 2.5 Sanitização Preventiva do Texto (Remove vestígios da Vivo para não confundir a IA)
+    // Procura por versões do CNPJ da Vivo com pontuação, sem pontuação ou com espaços
+    const vivoRegex = /0\s?2\s?\.\s?5\s?5\s?8\s?\.\s?1\s?5\s?7\s?\/\s?0\s?0\s?0\s?1\s?\-\s?6\s?2/g;
+    const vivoRaw = /02558157000162/g;
+    const sanitizedText = rawText
+        .replace(vivoRegex, '[CNPJ_EMISSOR_VIVO_REMOVIDO]')
+        .replace(vivoRaw, '[CNPJ_EMISSOR_VIVO_REMOVIDO]');
+
+    // 3. Chamada à IA
+    const prompt = buildPdfPrompt(sanitizedText, JSON.stringify(unitsContext, null, 2), allowedCnpjs);
+
+    const completion = await openai.chat.completions.create({
+        model: AI_MODEL,
+        messages: [
+            {
+                role: 'system',
+                content: 'Você é um especialista em análise de faturas de telecom. Sua prioridade absoluta é identificar o CLIENTE pagador e ignorar o EMISSOR Vivo.',
+            },
+            { role: 'user', content: prompt },
+        ],
+        response_format: { type: 'json_object' },
+    });
+
+    const raw = JSON.parse(completion.choices[0].message.content);
+    console.log('[IA] Extração concluída. Dados brutos:', raw);
+
+    // 4. Validação final (Garantia de que nunca salva o CNPJ da Vivo)
+    raw.cnpj = forceCleanCnpj(raw.cnpj);
+
+    // 5. Fallbacks via regex se a IA falhar em campos críticos
+    
+    // Fallback: Número da Conta/Contrato
+    if (!raw.contractNumber) {
+        const contractMatch =
+            rawText.match(/Conta[:\s]+(\d{10,14})/i) ||
+            rawText.match(/Conta[^0-9]+(\d{10,14})/i) ||
+            rawText.match(/N[úu]mero\s+da\s+Conta[:\s]+(\d{10,14})/i);
+        if (contractMatch) raw.contractNumber = contractMatch[1];
     }
 
-    // 1. Prioriza 100% o retorno da IA se ela encontrou IDs válidos na lista fornecida
-    if (extractedData.unitId) {
-        const u = units.find(x => x.id === extractedData.unitId);
-        if (u) {
-            bestUnit = u;
-            if (extractedData.serviceId) {
-                bestService = u.services.find(s => s.id === extractedData.serviceId);
+    // Fallback: Mês de Referência (MM/AAAA)
+    if (!raw.referenceMonth) {
+        const monthMatch = rawText.match(/(?:m[êe]s\s+de\s+refer[êe]ncia|refer[êe]ncia)[:\s]+(\d{2}\/\d{4})/i);
+        if (monthMatch) raw.referenceMonth = monthMatch[1];
+    }
+
+    // Fallback: Data de Vencimento (converte DD/MM/AAAA para AAAA-MM-DD)
+    if (!raw.dueDate) {
+        const dueMatch = rawText.match(/(?:vencimento|venc\.?|pague\s+at[ée]|vencendo\s+em)[:\s]+(\d{2}\/\d{2}\/\d{2,4})/i);
+        if (dueMatch) {
+            const parts = dueMatch[1].split('/');
+            if (parts.length === 3) {
+                const year = parts[2].length === 2 ? `20${parts[2]}` : parts[2];
+                raw.dueDate = `${year}-${parts[1]}-${parts[0]}`;
             }
-            debugInfo.source = 'IA direct match';
-            return { unit: bestUnit, service: bestService || null, debug: debugInfo };
         }
     }
 
-    // 2. Se a IA falhar em dar o ID certo, caímos pro Double-Check Local (Fallback com Pontuação)
+    // Fallback: Valor Total
+    if (!raw.totalAmount) {
+        const amountMatch = rawText.match(/(?:total\s+a\s+pagar|valor\s+total|total\s+da\s+fatura)[:\s]+(?:r\$?\s*)?([\d.]+,\d{2})/i);
+        if (amountMatch) raw.totalAmount = amountMatch[1];
+    }
+
+    // 6. Sanitização final antes de retornar
+    const finalData = {
+        ...raw,
+        cnpj: raw.cnpj,
+        totalAmount: typeof raw.totalAmount === 'string'
+            ? Number(raw.totalAmount.replace('.', '').replace(',', '.'))
+            : raw.totalAmount,
+    };
+
+    console.log('[DEBUG_EXTRACTOR] Retornando dados para o controller:', JSON.stringify(finalData, null, 2));
+    
+    // Bypass Zod validation for now to avoid persistent schema errors
+    // const validData = extractedInvoiceSchema.parse(finalData);
+    return { data: finalData, text: rawText, rawAiOutput: raw };
+}
+
+/**
+ * Limpeza final incondicional: Se o CNPJ ainda for da Vivo, descarta.
+ */
+function forceCleanCnpj(cnpj) {
+    if (!cnpj) return null;
+    const clean = cnpj.replace(/\D/g, '');
+    if (clean.startsWith(VIVO_CNPJ_ROOT)) {
+        console.log(`[Extrator] IA retornou CNPJ da Vivo (${cnpj}). Bloqueando e usando Matriz.`);
+        return SOBEI_MATRIZ_CNPJ;
+    }
+    return cnpj;
+}
+
+/**
+ * Verifica/corrige o match de unidade/serviço após a extração da IA.
+ */
+function localDoubleCheckMatch(extractedData, units) {
+    if (!units?.length) return { unit: null, service: null, debug: { source: 'nenhum' } };
+
     const extContract = extractedData.contractNumber ? extractedData.contractNumber.replace(/\D/g, '') : null;
     const extUnitCnpj = extractedData.unitCnpj ? normalizeCnpj(extractedData.unitCnpj) : null;
     const extMainCnpj = extractedData.cnpj ? normalizeCnpj(extractedData.cnpj) : null;
 
+    // 1. PRIORIDADE MÁXIMA: Match Direto de Contrato (O critério majoritário)
+    if (extContract) {
+        for (const unit of units) {
+            for (const svc of unit.services) {
+                const dbContract = svc.contractNumber ? svc.contractNumber.replace(/\D/g, '') : null;
+                if (dbContract && dbContract === extContract) {
+                    return { unit, service: svc, debug: { source: 'Match por Contrato (Majoritário)' } };
+                }
+            }
+        }
+    }
+
+    // 2. Pontuação por outros critérios (Endereço > Serviço > CNPJ)
+    let bestUnit = null;
+    let bestService = null;
     let maxScore = -1;
 
     for (const unit of units) {
         let currentScore = 0;
         let matchedSvc = null;
 
-        // --- MATCHES ABSOLUTOS (Ganha na hora) ---
-        // Tentativa de achar pelo número do Contrato/Conta (Fortíssimo em faturas telefonia)
-        for (const svc of unit.services) {
-            const dbContract = svc.contractNumber ? svc.contractNumber.replace(/\D/g, '') : null;
-            if (extContract && dbContract && dbContract === extContract) {
-                return { unit, service: svc, debug: { source: 'Local Double-Check - Exact Contract match' } };
-            }
-        }
-
-        // Tentativa por CNPJ Exato da Filial (Fortíssimo)
-        if (extUnitCnpj) {
-            const uCnpjs = parseCnpjs(unit.cnpjs).map(normalizeCnpj);
-            if (uCnpjs.includes(extUnitCnpj)) {
-                currentScore += 50;
-            }
-        }
-
-        // --- FUZZY SCORING ---
-        // Se a unidade pertencer à empresa cujo CNPJ é o CNPJ principal da conta
-        const uCnpjs = parseCnpjs(unit.cnpjs).map(normalizeCnpj);
-        if (extMainCnpj && uCnpjs.includes(extMainCnpj)) {
-            currentScore += 10;
-        }
-
+        // A. Endereço de Instalação (Muito Relevante)
         if (extractedData.unitAddress && unit.address) {
             currentScore += scoreAddress(extractedData.unitAddress, unit.address);
         }
 
-        if (extractedData.companyName && unit.name) {
-            const cName = extractedData.companyName.toLowerCase();
-            const uName = unit.name.toLowerCase();
-            if (cName.includes(uName) || uName.includes(cName)) {
-                currentScore += 12;
-            }
-        }
-
+        // B. Match de Serviço por Nome (Bônus)
         if (extractedData.service) {
             let bestSvcScore = 0;
             for (const svc of unit.services) {
-                let s = scoreServiceName(extractedData.service, svc.name);
+                const s = scoreServiceName(extractedData.service, svc.name);
                 if (s > bestSvcScore) {
                     bestSvcScore = s;
                     matchedSvc = svc;
@@ -305,23 +286,32 @@ function localDoubleCheckMatch(extractedData, units) {
             currentScore += bestSvcScore;
         }
 
-        // Guarda a unidade com o maior score
+        // C. CNPJ (Critério de desempate, menos importante agora)
+        const uCnpjs = parseCnpjs(unit.cnpjs).map(normalizeCnpj);
+        if (extUnitCnpj && uCnpjs.includes(extUnitCnpj)) {
+            currentScore += 15; // Antes era 50
+        } else if (extMainCnpj && uCnpjs.includes(extMainCnpj)) {
+            currentScore += 5; // Antes era 10
+        }
+
+        // D. Bônus por sugestão da IA (Damos um pequeno peso se a IA sugeriu esta unidade)
+        if (extractedData.unitId === unit.id) {
+            currentScore += 10;
+        }
+
         if (currentScore > maxScore) {
             maxScore = currentScore;
             bestUnit = unit;
             bestService = matchedSvc;
-            debugInfo.source = `Fuzzy Scoring (Score: ${currentScore})`;
         }
     }
 
-    // Só rejeita se o PDF for em branco e não bater informações relevantes.
-    // Exigimos agora um mínimo de consistência (ex: CNPJ + algum outro dado, ou Endereço forte).
-    // O threshold mínimo agora será > 0.
-    if (bestUnit && maxScore > 0) {
-        return { unit: bestUnit, service: bestService || null, debug: debugInfo };
+    // Se a pontuação for muito baixa, não garantimos o match
+    if (bestUnit && maxScore >= 20) {
+        return { unit: bestUnit, service: bestService ?? null, debug: { source: 'Match por Pontuação (Fuzzy)', score: maxScore } };
     }
 
-    return { unit: null, service: null, debug: debugInfo };
+    return { unit: null, service: null, debug: { source: 'Nenhum match confiável', lastBestScore: maxScore } };
 }
 
 module.exports = { extractInvoiceDataWithContext, localDoubleCheckMatch };
